@@ -30,7 +30,9 @@ const (
 )
 
 func New(dir string) (*skipTable, error) {
-	st := &skipTable{}
+	st := &skipTable{
+		dir: dir,
+	}
 	return st, st.init()
 }
 
@@ -81,7 +83,7 @@ func (st *skipTable) init() error {
 	return nil
 }
 
-func (st *skipTable) offset(k Key, v Value) (uint32, error) {
+func (st *skipTable) Offset(k Key, v Value) (uint32, error) {
 	for _, block := range st.blocks {
 		blockOffset := int32(k) * skipLineLength
 		b := block[blockOffset : blockOffset+skipLineLength]
@@ -102,7 +104,7 @@ func (st *skipTable) offset(k Key, v Value) (uint32, error) {
 	return 0, fmt.Errorf("Offset for key %v not found", k)
 }
 
-func (st *skipTable) store(k Key, offset uint32, start Value) error {
+func (st *skipTable) Store(k Key, offset uint32, start Value) error {
 	for _, block := range st.blocks {
 		blockOffset := int32(k) * skipLineLength
 		b := block[blockOffset : blockOffset+skipLineLength]
@@ -111,19 +113,19 @@ func (st *skipTable) store(k Key, offset uint32, start Value) error {
 		var i int
 		for {
 			if binary.BigEndian.Uint64(b[i:i+8]) != 0 {
+				i++
 				continue
 			}
 			binary.BigEndian.PutUint32(b[i:i+4], offset)
 			binary.BigEndian.PutUint32(b[i+4:i+8], uint32(start))
-
-			i++
+			return nil
 		}
 	}
 
-	return nil
+	return fmt.Errorf("error")
 }
 
-func (st *skipTable) sync() error {
+func (st *skipTable) Sync() error {
 	for _, b := range st.blocks {
 		if err := b.Flush(); err != nil {
 			return err
@@ -138,8 +140,8 @@ func (st *skipTable) sync() error {
 
 }
 
-func (st *skipTable) close() error {
-	if err := st.sync(); err != nil {
+func (st *skipTable) Close() error {
+	if err := st.Sync(); err != nil {
 		return err
 	}
 	for _, b := range st.blocks {
