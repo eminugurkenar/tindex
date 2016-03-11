@@ -41,26 +41,10 @@ var DefaultOpts = Opts{
 }
 
 func New(dir string, opts Opts) (*SkipTable, error) {
-	st := &SkipTable{
+	return &SkipTable{
 		dir:  dir,
 		opts: opts,
-	}
-	return st, st.init()
-}
-
-func (st *SkipTable) init() error {
-	// filenames, err := filepath.Glob(filepath.Join(st.dir, "skip-0-*"))
-	// if err != nil {
-	// 	return fmt.Errorf("finding table files failed: %s", err)
-	// }
-
-	// if len(st.files) == 0 {
-	if err := st.allocateBlock(0, 0); err != nil {
-		return err
-	}
-	// }
-
-	return nil
+	}, nil
 }
 
 func (st *SkipTable) filename(row, col int) string {
@@ -107,7 +91,7 @@ func (st *SkipTable) allocateBlock(row, col int) error {
 	if col == 0 {
 		st.blocks = append(st.blocks, []mmap.MMap{})
 	}
-	st.blocks[col] = append(st.blocks[col], b)
+	st.blocks[row] = append(st.blocks[row], b)
 
 	return nil
 }
