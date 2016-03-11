@@ -16,77 +16,117 @@ type Value uint32
 
 type Set []Value
 
-type skipTable struct {
+type SkipTable struct {
 	files  []*os.File
-	blocks []mmap.MMap
+	blocks [][]mmap.MMap
 
-	dir string
+	dir  string
+	opts Opts
 }
 
 const (
-	skipTableFileSize = 4096 * 8
-	skipLineLength    = 1024    // TODO(fabxc): reduce after delta compression.
-	skipTableRows     = 1 << 10 // TODO(fabxc): increase later.
+	filenamePat = "st-%d-%d"
 )
 
-func New(dir string) (*skipTable, error) {
-	st := &skipTable{
-		dir: dir,
+type Opts struct {
+	BlockRows       int
+	BlockLineLength int
+}
+
+// DefaultOpts are the default options for skip tables.
+// They result in block files of 8MB each.
+var DefaultOpts = Opts{
+	BlockRows:       1 << 15,
+	BlockLineLength: 1 << 8,
+}
+
+func New(dir string, opts Opts) (*SkipTable, error) {
+	st := &SkipTable{
+		dir:  dir,
+		opts: opts,
 	}
 	return st, st.init()
 }
 
-func (st *skipTable) init() error {
-	filenames, err := filepath.Glob(filepath.Join(st.dir, "skip-0-*"))
-	if err != nil {
-		return fmt.Errorf("finding table files failed: %s", err)
+func (st *SkipTable) init() error {
+	// filenames, err := filepath.Glob(filepath.Join(st.dir, "skip-0-*"))
+	// if err != nil {
+	// 	return fmt.Errorf("finding table files failed: %s", err)
+	// }
+
+	// if len(st.files) == 0 {
+	if err := st.allocateBlock(0, 0); err != nil {
+		return err
 	}
-
-	for _, fn := range filenames {
-		f, err := os.Open(fn)
-		if err != nil {
-			return fmt.Errorf("opening %q failed: %s", fn, err)
-		}
-
-		b, err := mmap.Map(f, mmap.RDWR, 0)
-		if err != nil {
-			return fmt.Errorf("mmapping %s failed: %s", fn, err)
-		}
-
-		st.files = append(st.files, f)
-		st.blocks = append(st.blocks, b)
-	}
-
-	if len(st.files) == 0 {
-		f, err := os.Create(filepath.Join(st.dir, "skip-0-0"))
-		if err != nil {
-			return fmt.Errorf("creating %s failed: %s", "skip-0-0", err)
-		}
-		ps := int64(syscall.Getpagesize())
-		numPages := (skipLineLength * skipTableRows) / ps
-		if numPages*ps < skipLineLength*skipTableRows {
-			numPages++
-		}
-		if err := f.Truncate(ps * numPages); err != nil {
-			return err
-		}
-
-		b, err := mmap.Map(f, mmap.RDWR, 0)
-		if err != nil {
-			return fmt.Errorf("mmapping %s failed: %s", f.Name(), err)
-		}
-
-		st.files = append(st.files, f)
-		st.blocks = append(st.blocks, b)
-	}
+	// }
 
 	return nil
 }
 
-func (st *skipTable) Offset(k Key, v Value) (uint32, error) {
-	for _, block := range st.blocks {
-		blockOffset := int32(k) * skipLineLength
-		b := block[blockOffset : blockOffset+skipLineLength]
+func (st *SkipTable) filename(row, col int) string {
+	return fmt.Sprintf(filepath.Join(st.dir, filenamePat), row, col)
+}
+
+func (st *SkipTable) allocateBlock(row, col int) error {
+	// For the first column the row must be new.
+	if col == 0 && len(st.blocks) != row {
+		return fmt.Errorf("inconsistent allocation row")
+	}
+	if col > 0 && len(st.blocks) != row+1 {
+		return fmt.Errorf("inconsistent allocation column")
+	}
+
+	fn := st.filename(row, col)
+
+	if _, err := os.Stat(fn); !os.IsNotExist(err) {
+		return fmt.Errorf("file %s already exists", fn)
+	}
+
+	f, err := os.Create(fn)
+	if err != nil {
+		return fmt.Errorf("creating %s failed: %s", fn, err)
+	}
+	st.files = append(st.files, f)
+
+	size := st.opts.BlockRows * st.opts.BlockLineLength
+	ps := syscall.Getpagesize()
+	numPages := size / ps
+
+	if numPages*ps < size {
+		numPages++
+	}
+	if err := f.Truncate(int64(ps * numPages)); err != nil {
+		return err
+	}
+
+	b, err := mmap.Map(f, mmap.RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("mmapping %s failed: %s", f.Name(), err)
+	}
+
+	if col == 0 {
+		st.blocks = append(st.blocks, []mmap.MMap{})
+	}
+	st.blocks[col] = append(st.blocks[col], b)
+
+	return nil
+}
+
+func (st *SkipTable) loadBlock(row, col int) error {
+	return nil
+}
+
+func (st *SkipTable) row(k Key) (int, int) {
+	br := int(k) / st.opts.BlockRows
+	bo := (int(k) - br*st.opts.BlockRows) * st.opts.BlockLineLength
+	return br, bo
+}
+
+func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
+	br, bo := st.row(k)
+
+	for _, block := range st.blocks[br] {
+		b := block[bo : bo+st.opts.BlockLineLength]
 
 		var i int
 		var prevOffset uint32
@@ -104,10 +144,11 @@ func (st *skipTable) Offset(k Key, v Value) (uint32, error) {
 	return 0, fmt.Errorf("Offset for key %v not found", k)
 }
 
-func (st *skipTable) Store(k Key, offset uint32, start Value) error {
-	for _, block := range st.blocks {
-		blockOffset := int32(k) * skipLineLength
-		b := block[blockOffset : blockOffset+skipLineLength]
+func (st *SkipTable) Store(k Key, offset uint32, start Value) error {
+	br, bo := st.row(k)
+
+	for _, block := range st.blocks[br] {
+		b := block[bo : bo+st.opts.BlockLineLength]
 
 		// TODO(fabxc): delta-compress this.
 		var i int
@@ -125,10 +166,12 @@ func (st *skipTable) Store(k Key, offset uint32, start Value) error {
 	return fmt.Errorf("error")
 }
 
-func (st *skipTable) Sync() error {
-	for _, b := range st.blocks {
-		if err := b.Flush(); err != nil {
-			return err
+func (st *SkipTable) Sync() error {
+	for _, br := range st.blocks {
+		for _, b := range br {
+			if err := b.Flush(); err != nil {
+				return err
+			}
 		}
 	}
 	for _, f := range st.files {
@@ -140,13 +183,15 @@ func (st *skipTable) Sync() error {
 
 }
 
-func (st *skipTable) Close() error {
+func (st *SkipTable) Close() error {
 	if err := st.Sync(); err != nil {
 		return err
 	}
-	for _, b := range st.blocks {
-		if err := b.Unmap(); err != nil {
-			return err
+	for _, br := range st.blocks {
+		for _, b := range br {
+			if err := b.Unmap(); err != nil {
+				return err
+			}
 		}
 	}
 	for _, f := range st.files {

@@ -1,6 +1,7 @@
 package skiptable
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -14,7 +15,11 @@ func TestNewSkipTableInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	table := &skipTable{
+	table := &SkipTable{
+		opts: Opts{
+			BlockRows:       256,
+			BlockLineLength: 256,
+		},
 		dir: dir,
 	}
 	if err := table.init(); err != nil {
@@ -22,13 +27,13 @@ func TestNewSkipTableInit(t *testing.T) {
 	}
 	defer table.Close()
 
-	stat, err := os.Stat(filepath.Join(dir, "skip-0-0"))
+	stat, err := os.Stat(filepath.Join(dir, fmt.Sprintf(filenamePat, 0, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Allocated file must be a multiple of page size.
-	expSize := skipTableRows * skipLineLength
+	expSize := table.opts.BlockRows * table.opts.BlockLineLength
 	ps := syscall.Getpagesize()
 	numPages := expSize / ps
 	if ps*numPages < expSize {
@@ -36,7 +41,7 @@ func TestNewSkipTableInit(t *testing.T) {
 	}
 
 	if stat.Size() != int64(ps*numPages) {
-		t.Fatalf("Expected new block size %d but got %d", skipLineLength*skipTableRows, stat.Size())
+		t.Fatalf("Expected new block size %d but got %d", ps*numPages, stat.Size())
 	}
 }
 
@@ -46,7 +51,10 @@ func TestSkipTableStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	table, err := New(dir)
+	table, err := New(dir, Opts{
+		BlockRows:       256,
+		BlockLineLength: 256,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
