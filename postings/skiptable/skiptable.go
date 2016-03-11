@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/edsrzf/mmap-go"
@@ -25,7 +28,8 @@ type SkipTable struct {
 }
 
 const (
-	filenamePat = "st-%d-%d"
+	filenameGlob = "st-*-*"
+	filenamePat  = "st-%d-%d"
 )
 
 type Opts struct {
@@ -41,14 +45,51 @@ var DefaultOpts = Opts{
 }
 
 func New(dir string, opts Opts) (*SkipTable, error) {
-	return &SkipTable{
+	st := &SkipTable{
 		dir:  dir,
 		opts: opts,
-	}, nil
+	}
+
+	filenames, err := filepath.Glob(filepath.Join(dir, filenameGlob))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(filenames)
+
+	for _, fn := range filenames {
+		parts := strings.Split(fn, "-")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("unexpected file %s", fn)
+		}
+		row, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("unexpected file %s", fn)
+		}
+		col, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return nil, fmt.Errorf("unexpected file %s", fn)
+		}
+
+		if err := st.loadBlock(row, col); err != nil {
+			return nil, fmt.Errorf("error loading block %s: %s", fn, err)
+		}
+	}
+	return st, nil
 }
 
 func (st *SkipTable) filename(row, col int) string {
 	return fmt.Sprintf(filepath.Join(st.dir, filenamePat), row, col)
+}
+
+func (st *SkipTable) blockFileSize() int64 {
+	size := st.opts.BlockRows * st.opts.BlockLineLength
+	ps := syscall.Getpagesize()
+	numPages := size / ps
+
+	if numPages*ps < size {
+		numPages++
+	}
+	return int64(ps * numPages)
 }
 
 func (st *SkipTable) allocateBlock(row, col int) error {
@@ -72,14 +113,7 @@ func (st *SkipTable) allocateBlock(row, col int) error {
 	}
 	st.files = append(st.files, f)
 
-	size := st.opts.BlockRows * st.opts.BlockLineLength
-	ps := syscall.Getpagesize()
-	numPages := size / ps
-
-	if numPages*ps < size {
-		numPages++
-	}
-	if err := f.Truncate(int64(ps * numPages)); err != nil {
+	if err := f.Truncate(st.blockFileSize()); err != nil {
 		return err
 	}
 
@@ -97,7 +131,40 @@ func (st *SkipTable) allocateBlock(row, col int) error {
 }
 
 func (st *SkipTable) loadBlock(row, col int) error {
+	// For the first column the row must be new.
+	if col == 0 && len(st.blocks) != row {
+		return fmt.Errorf("inconsistent allocation row")
+	}
+	if col > 0 && len(st.blocks) != row+1 {
+		return fmt.Errorf("inconsistent allocation column")
+	}
+
+	stat, err := os.Stat(st.filename(row, col))
+	if err != nil {
+		return err
+	}
+	if stat.Size() != st.blockFileSize() {
+		return fmt.Errorf("unexpected file size %d", stat.Size())
+	}
+
+	f, err := os.OpenFile(st.filename(row, col), os.O_RDWR, 0666)
+	if err != nil {
+		return err
+	}
+	st.files = append(st.files, f)
+
+	b, err := mmap.Map(f, mmap.RDWR, 0)
+	if err != nil {
+		return err
+	}
+
+	if col == 0 {
+		st.blocks = append(st.blocks, []mmap.MMap{})
+	}
+	st.blocks[row] = append(st.blocks[row], b)
+
 	return nil
+
 }
 
 func (st *SkipTable) row(k Key) (int, int) {
