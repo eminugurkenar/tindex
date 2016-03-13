@@ -100,13 +100,14 @@ func (st *SkipTable) blockFileSize() int64 {
 }
 
 func (st *SkipTable) allocateBlock(row, col int) error {
-	fmt.Println("allocating", row, col)
-	// For the first column the row must be new.
-	if col == 0 && len(st.blocks) != row {
+	if row > len(st.blocks) {
 		return fmt.Errorf("inconsistent allocation row")
-	}
-	if col > 0 && len(st.blocks[row]) != col {
-		return fmt.Errorf("inconsistent allocation column")
+	} else if row == len(st.blocks) {
+		if col != 0 {
+			return fmt.Errorf("inconsistent allocation row")
+		}
+	} else if len(st.blocks[row]) > col {
+		return fmt.Errorf("inconsistent allocation col")
 	}
 
 	fn := st.filename(row, col)
@@ -194,7 +195,6 @@ func findUint32(l *line, v Value) (uint32, error) {
 
 	// The first entry might already be higher than what we are looking for.
 	// In that case the first relevant values are at this offset.
-	// fmt.Println("read value", Value(binary.BigEndian.Uint32(b[:4])), v)
 	if Value(binary.BigEndian.Uint32(b[:4])) >= v {
 		return lastOffset, nil
 	}
@@ -212,7 +212,6 @@ func findUint32(l *line, v Value) (uint32, error) {
 		// If the value is larger than what we are searching for, the last
 		// offset is the closest result.
 		value := Value(binary.BigEndian.Uint32(b[:4]))
-		// fmt.Println("read value", value)
 		if value > v {
 			break
 		}
@@ -299,7 +298,7 @@ func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
 		return findUint32(l, v)
 	}
 
-	return 0, fmt.Errorf("unknown 2line encoding %q", c)
+	return 0, fmt.Errorf("unknown line encoding %q", c)
 }
 
 func (st *SkipTable) Store(k Key, start Value, offset uint32) error {
@@ -343,7 +342,7 @@ func (st *SkipTable) Store(k Key, start Value, offset uint32) error {
 		return storeUint32(l, start, offset)
 	}
 
-	return fmt.Errorf("unkno33wn line encoding %q", c)
+	return fmt.Errorf("unknown line encoding %q", c)
 }
 
 func (st *SkipTable) Sync() error {
@@ -435,7 +434,6 @@ func (l *line) ReadByte() (byte, error) {
 		return l.ReadByte()
 	}
 	c := b[l.offset+l.pos]
-	// fmt.Printf("read byte %v - %d %d %d\n", c, l.col, l.pos, l.offset)
 	l.pos++
 	return c, nil
 }
@@ -447,14 +445,11 @@ func (l *line) WriteByte(c byte) error {
 		l.pos = 0
 		l.col++
 		if l.col == len(l.blocks) {
-			// fmt.Printf("%d  %d  %d  %d\n", l.pos, l.col, len(l.blocks), l.lineLength)
 			b, err = l.allocate(l.col)
 			if err != nil {
-				// fmt.Println("err", err)
 				return err
 			}
 			l.blocks = append(l.blocks, b)
-			// fmt.Printf("blocks len after %d", len(l.blocks))
 		} else {
 			b = l.blocks[l.col]
 		}

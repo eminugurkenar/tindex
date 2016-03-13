@@ -227,7 +227,7 @@ func BenchmarkSkipTableStore(b *testing.B) {
 	}
 	defer table.Close()
 
-	data := generateData(int(b.N)*100, uint32(b.N))
+	data := generateData(int(b.N), uint32(b.N)/50+1)
 
 	b.ResetTimer()
 
@@ -252,7 +252,7 @@ func BenchmarkSkipTableOffset(b *testing.B) {
 	}
 	defer table.Close()
 
-	data := generateData(int(b.N)*100, uint32(b.N))
+	data := generateData(int(b.N), uint32(b.N)/50+1)
 
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
