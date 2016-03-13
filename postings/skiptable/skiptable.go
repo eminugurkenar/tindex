@@ -2,7 +2,9 @@ package skiptable
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +20,11 @@ type Key uint32
 type Value uint32
 
 type Set []Value
+
+const (
+	lineUnused    = '\x00'
+	lineEncUint32 = '\x01'
+)
 
 type SkipTable struct {
 	files  []*os.File
@@ -93,11 +100,12 @@ func (st *SkipTable) blockFileSize() int64 {
 }
 
 func (st *SkipTable) allocateBlock(row, col int) error {
+	fmt.Println("allocating", row, col)
 	// For the first column the row must be new.
 	if col == 0 && len(st.blocks) != row {
 		return fmt.Errorf("inconsistent allocation row")
 	}
-	if col > 0 && len(st.blocks) != row+1 {
+	if col > 0 && len(st.blocks[row]) != col {
 		return fmt.Errorf("inconsistent allocation column")
 	}
 
@@ -135,7 +143,7 @@ func (st *SkipTable) loadBlock(row, col int) error {
 	if col == 0 && len(st.blocks) != row {
 		return fmt.Errorf("inconsistent allocation row")
 	}
-	if col > 0 && len(st.blocks) != row+1 {
+	if col > 0 && len(st.blocks[row]) != col {
 		return fmt.Errorf("inconsistent allocation column")
 	}
 
@@ -173,48 +181,169 @@ func (st *SkipTable) row(k Key) (int, int) {
 	return br, bo
 }
 
+var ErrNotFound = errors.New("not found")
+
+func findUint32(l *line, v Value) (uint32, error) {
+	b := make([]byte, 8)
+
+	if _, err := l.Read(b); err != nil {
+		return 0, err
+	}
+	// The initial val/offset pair is always set.
+	lastOffset := binary.BigEndian.Uint32(b[4:])
+
+	// The first entry might already be higher than what we are looking for.
+	// In that case the first relevant values are at this offset.
+	// fmt.Println("read value", Value(binary.BigEndian.Uint32(b[:4])), v)
+	if Value(binary.BigEndian.Uint32(b[:4])) >= v {
+		return lastOffset, nil
+	}
+
+	for {
+		_, err := l.Read(b)
+		// If we've reached the end of the skip list the last offset is
+		// our result.
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		// If the value is larger than what we are searching for, the last
+		// offset is the closest result.
+		value := Value(binary.BigEndian.Uint32(b[:4]))
+		// fmt.Println("read value", value)
+		if value > v {
+			break
+		}
+		lastOffset = binary.BigEndian.Uint32(b[4:])
+		if value == v {
+			break
+		}
+	}
+
+	return lastOffset, nil
+}
+
+func initUint32(l *line, v Value, offset uint32) error {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[:4], uint32(v))
+	binary.BigEndian.PutUint32(b[4:], offset)
+
+	_, err := l.Write(b)
+	return err
+}
+
+func storeUint32(l *line, v Value, offset uint32) error {
+	b := make([]byte, 8)
+
+	n, err := l.Read(b)
+	if err != nil {
+		return err
+	}
+	// The initial val/offset pair is always set but we don't need it.
+
+	for {
+		n, err = l.Read(b)
+		// If we've reached the end of the skip list the last offset is
+		// our result.
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		// If the value is larger than what we are searching for, the last
+		// offset is the closest result.
+		if Value(binary.BigEndian.Uint32(b[:4])) == 0 {
+			break
+		}
+	}
+	for n > 0 {
+		n--
+		if err = l.UnreadByte(); err != nil {
+			return err
+		}
+	}
+
+	binary.BigEndian.PutUint32(b[:4], uint32(v))
+	binary.BigEndian.PutUint32(b[4:], offset)
+
+	_, err = l.Write(b)
+	return err
+}
+
 func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
 	br, bo := st.row(k)
 
-	for _, block := range st.blocks[br] {
-		b := block[bo : bo+st.opts.BlockLineLength]
-
-		var i int
-		var prevOffset uint32
-		for {
-			val := Value(binary.BigEndian.Uint32(b[i+4 : i+8]))
-			if val > v {
-				return prevOffset, nil
-			}
-
-			prevOffset = binary.BigEndian.Uint32(b[i : i+4])
-
-			i++
-		}
+	if br >= len(st.blocks) {
+		return 0, ErrNotFound
 	}
-	return 0, fmt.Errorf("Offset for key %v not found", k)
+
+	l := &line{
+		blocks:     st.blocks[br],
+		offset:     bo,
+		lineLength: st.opts.BlockLineLength,
+	}
+
+	// Read the byte specifying the line encoding.
+	c, err := l.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	switch c {
+	case lineUnused:
+		return 0, ErrNotFound
+	case lineEncUint32:
+		return findUint32(l, v)
+	}
+
+	return 0, fmt.Errorf("unknown 2line encoding %q", c)
 }
 
-func (st *SkipTable) Store(k Key, offset uint32, start Value) error {
+func (st *SkipTable) Store(k Key, start Value, offset uint32) error {
 	br, bo := st.row(k)
 
-	for _, block := range st.blocks[br] {
-		b := block[bo : bo+st.opts.BlockLineLength]
-
-		// TODO(fabxc): delta-compress this.
-		var i int
-		for {
-			if binary.BigEndian.Uint64(b[i:i+8]) != 0 {
-				i++
-				continue
-			}
-			binary.BigEndian.PutUint32(b[i:i+4], offset)
-			binary.BigEndian.PutUint32(b[i+4:i+8], uint32(start))
-			return nil
+	for len(st.blocks) <= br {
+		if err := st.allocateBlock(len(st.blocks), 0); err != nil {
+			return err
 		}
 	}
 
-	return fmt.Errorf("error")
+	l := &line{
+		blocks:     st.blocks[br],
+		offset:     bo,
+		lineLength: st.opts.BlockLineLength,
+		allocate: func(col int) (mmap.MMap, error) {
+			err := st.allocateBlock(br, col)
+			if err != nil {
+				return nil, err
+			}
+			return st.blocks[br][col], nil
+		},
+	}
+
+	// Read the byte specifying the line encoding.
+	c, err := l.ReadByte()
+	if err != nil {
+		return err
+	}
+
+	switch c {
+	case lineUnused:
+		if err := l.UnreadByte(); err != nil {
+			return err
+		}
+		if err := l.WriteByte(lineEncUint32); err != nil {
+			return err
+		}
+		return initUint32(l, start, offset)
+	case lineEncUint32:
+		return storeUint32(l, start, offset)
+	}
+
+	return fmt.Errorf("unkno33wn line encoding %q", c)
 }
 
 func (st *SkipTable) Sync() error {
@@ -250,5 +379,91 @@ func (st *SkipTable) Close() error {
 			return err
 		}
 	}
+	return nil
+}
+
+type line struct {
+	allocate   func(col int) (mmap.MMap, error)
+	blocks     []mmap.MMap
+	col        int
+	offset     int
+	pos        int
+	lineLength int
+}
+
+func (l *line) UnreadByte() error {
+	if l.pos > 0 {
+		l.pos--
+		return nil
+	}
+	if l.col == 0 {
+		return fmt.Errorf("cannot unread from zero position")
+	}
+	l.col--
+	l.pos = l.lineLength - 1
+	return nil
+}
+
+func (l *line) Read(b []byte) (n int, err error) {
+	for i := range b {
+		if b[i], err = l.ReadByte(); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func (l *line) Write(b []byte) (n int, err error) {
+	for _, c := range b {
+		if err = l.WriteByte(c); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, err
+}
+
+func (l *line) ReadByte() (byte, error) {
+	if l.col == len(l.blocks) {
+		return 0, io.EOF
+	}
+	b := l.blocks[l.col]
+	if l.pos == l.lineLength {
+		l.col++
+		l.pos = 0
+		return l.ReadByte()
+	}
+	c := b[l.offset+l.pos]
+	// fmt.Printf("read byte %v - %d %d %d\n", c, l.col, l.pos, l.offset)
+	l.pos++
+	return c, nil
+}
+
+func (l *line) WriteByte(c byte) error {
+	var b mmap.MMap
+	var err error
+	if l.pos == l.lineLength {
+		l.pos = 0
+		l.col++
+		if l.col == len(l.blocks) {
+			// fmt.Printf("%d  %d  %d  %d\n", l.pos, l.col, len(l.blocks), l.lineLength)
+			b, err = l.allocate(l.col)
+			if err != nil {
+				// fmt.Println("err", err)
+				return err
+			}
+			l.blocks = append(l.blocks, b)
+			// fmt.Printf("blocks len after %d", len(l.blocks))
+		} else {
+			b = l.blocks[l.col]
+		}
+	} else {
+		b = l.blocks[l.col]
+	}
+
+	b[l.offset+l.pos] = c
+	l.pos++
+
 	return nil
 }

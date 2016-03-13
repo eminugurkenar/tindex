@@ -2,8 +2,10 @@ package skiptable
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -133,7 +135,44 @@ func TestSkipTableLoad(t *testing.T) {
 			}
 		}
 	}
+}
 
+type testData struct {
+	k      Key
+	v      Value
+	offset uint32
+}
+
+func generateData(n int, maxKey uint32) []testData {
+	data := make([]testData, n)
+
+	for i := range data {
+		data[i].k = Key(rand.Intn(int(maxKey)))
+		data[i].v = Value(i*10 + rand.Intn(5))
+		data[i].offset = uint32(rand.Int31n(1000))
+	}
+
+	return data
+}
+
+func hexdump(t *testing.T, table *SkipTable) {
+	filenames, err := filepath.Glob(filepath.Join(table.dir, filenameGlob))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fn := range filenames {
+		f, err := os.Open(fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ioutil.ReadAll(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Truncate page padding.
+		t.Logf("%s:\n%s\n", fn, hex.Dump(b[:table.opts.BlockRows*table.opts.BlockLineLength]))
+	}
 }
 
 func TestSkipTableStore(t *testing.T) {
@@ -143,23 +182,91 @@ func TestSkipTableStore(t *testing.T) {
 	}
 
 	table, err := New(dir, Opts{
-		BlockRows:       16,
-		BlockLineLength: 16,
+		BlockRows:       4096,
+		BlockLineLength: 512,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer table.Close()
 
-	// if err := table.Store(123, 1024, 3); err != nil {
-	// 	t.Fatal(err)
-	// }
+	data := generateData(1000000, 50000)
 
-	// offset, err := table.Offset(123, 4)
-	// if err != nil {
-	// 	t.Fatal(err)
-	// }
-	// if offset != 1024 {
-	// 	t.Errorf("Expected offset 1024 but got %d", offset)
-	// }
+	for _, d := range data {
+		// fmt.Println("store", d)
+		if err := table.Store(d.k, d.v, d.offset); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, d := range data {
+		offset, err := table.Offset(d.k, d.v) //+Value(rand.Intn(5)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if offset != d.offset {
+			t.Errorf("key: %v, val: %v, offset: %v.\tgot offset: %v", d.k, d.v, d.offset, offset)
+		}
+	}
+
+	hexdump(t, table)
+}
+
+func BenchmarkSkipTableStore(b *testing.B) {
+	dir, err := ioutil.TempDir("", "skiptable_test")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	table, err := New(dir, Opts{
+		BlockRows:       4096,
+		BlockLineLength: 512,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer table.Close()
+
+	data := generateData(int(b.N)*100, uint32(b.N))
+
+	b.ResetTimer()
+
+	for _, d := range data {
+		if err := table.Store(d.k, d.v, d.offset); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+func BenchmarkSkipTableOffset(b *testing.B) {
+	dir, err := ioutil.TempDir("", "skiptable_test")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	table, err := New(dir, Opts{
+		BlockRows:       4096,
+		BlockLineLength: 512,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer table.Close()
+
+	data := generateData(int(b.N)*100, uint32(b.N))
+
+	for _, d := range data {
+		if err := table.Store(d.k, d.v, d.offset); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+
+	for _, d := range data {
+		offset, err := table.Offset(d.k, d.v) //+Value(rand.Intn(5)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = offset
+	}
 }
