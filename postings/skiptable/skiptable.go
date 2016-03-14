@@ -206,7 +206,7 @@ func findRangeUint32(l *line, from, to Value) ([]uint32, error) {
 		// If the value is larger than what we are searching for, the last
 		// offset is the closest result.
 		value := Value(binary.BigEndian.Uint32(b[:4]))
-		if value > to {
+		if value > to || value == 0 {
 			break
 		}
 		off := binary.BigEndian.Uint32(b[4:])

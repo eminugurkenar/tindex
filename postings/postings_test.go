@@ -24,8 +24,8 @@ func TestPostings(t *testing.T) {
 
 	data := generateData(&generateOpts{
 		numKeys:   1,
-		numValMin: 390,
-		numValMax: 400,
+		numValMin: 90,
+		numValMax: 100,
 	})
 
 	for _, d := range data {
@@ -44,7 +44,7 @@ func TestPostings(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(set, d.Set) {
-			t.Fatalf("Expected for key %d set |%d|\n %v\n\n but got |%d| %v", d.Key, len(d.Set), d.Set, len(set), set)
+			t.Fatalf("Expected for key %d set |%d|\n%v\n\n but got|%d|\n%v", d.Key, len(d.Set), d.Set, len(set), set)
 		}
 	}
 }

@@ -87,14 +87,12 @@ func New(dir string) (Postings, error) {
 }
 
 func (p *postings) allocatePage(k Key, v Value) (uint32, error) {
-	fmt.Println("alloc")
-
 	stat, err := p.file.Stat()
 	if err != nil {
 		return 0, err
 	}
 	// Grow file.
-	if int64(p.nextPage*indexBlockSize) > stat.Size() {
+	if int64((p.nextPage+1)*indexBlockSize) > stat.Size() {
 		fmt.Println("grow file")
 		if err := p.data.Flush(); err != nil {
 			return 0, err
@@ -116,6 +114,8 @@ func (p *postings) allocatePage(k Key, v Value) (uint32, error) {
 	if err := p.skipTable.Store(skiptable.Key(k), skiptable.Value(v), offset); err != nil {
 		return 0, fmt.Errorf("skip table store: %s", err)
 	}
+
+	binary.PutUvarint(p.page(offset), uint64(pageEncodingUint32))
 	p.nextPage++
 
 	return offset, nil
@@ -128,25 +128,26 @@ func (p *postings) page(offset uint32) []byte {
 
 func (p *postings) Set(k Key, v Value, ptr uint64) error {
 	off, err := p.skipTable.Offset(skiptable.Key(k), skiptable.Value(v))
-	if err != nil {
+	if err != nil && err != skiptable.ErrNotFound {
 		return fmt.Errorf("skip table: %s", err)
 	}
 
-	a, err := newPageAppender(p.page(off), false)
-	if err != nil {
-		return err
-	}
-	err = a.append(v, ptr)
-	if err != errPageFull {
-		return err
+	if err != skiptable.ErrNotFound {
+		a, err := newPageAppender(p.page(off), false)
+		if err != nil {
+			return err
+		}
+		if err = a.append(v, ptr); err != errPageFull {
+			return err
+		}
 	}
 	// The page couldn't fit the sample. Allocate a new page.
 	// If that one fails too, propagate the error.
-	off, err2 := p.allocatePage(k, v)
-	if err2 != nil {
-		return err2
+	off, err = p.allocatePage(k, v)
+	if err != nil {
+		return err
 	}
-	a, err = newPageAppender(p.page(off), true)
+	a, err := newPageAppender(p.page(off), true)
 	if err != nil {
 		return err
 	}
@@ -346,6 +347,8 @@ func (p *pageReaderUint32) findRange(min, max Value) Set {
 		// The min/max interval didn't include any value.
 		return set
 	}
+
+	i += 12
 
 	for ; i < len(p.page); i += 12 {
 		val := Value(binary.BigEndian.Uint32(p.page[i : i+4]))
