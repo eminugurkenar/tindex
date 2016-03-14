@@ -3,8 +3,8 @@ package postings
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -121,123 +121,49 @@ func (p *postings) allocatePage(k Key, v Value) (uint32, error) {
 	return offset, nil
 }
 
-func (p *postings) Set(k Key, v Value, pointer uint64) error {
-	fmt.Println("set", k, v, pointer)
-	offset, err := p.skipTable.Offset(skiptable.Key(k), skiptable.Value(v))
+// page returns the raw page at offset.
+func (p *postings) page(offset uint32) []byte {
+	return []byte(p.data[offset*indexBlockSize : (offset+1)*indexBlockSize])
+}
+
+func (p *postings) Set(k Key, v Value, ptr uint64) error {
+	off, err := p.skipTable.Offset(skiptable.Key(k), skiptable.Value(v))
 	if err != nil {
-		if err != skiptable.ErrNotFound {
-			return fmt.Errorf("error querying skip table: %s", err)
-		}
-		offset, err = p.allocatePage(k, v)
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("skip table: %s", err)
 	}
 
-	irw := &indexRW{
-		allocate: func() ([]byte, uint32, error) {
-			fmt.Println("allocate from write")
-			off, err := p.allocatePage(k, v)
-			if err != nil {
-				return nil, 0, fmt.Errorf("page allocation failed: %s", err)
-			}
-			return p.data, off, nil
-		},
-		offsets: []uint32{offset},
-		data:    p.data,
-		pos:     1,
+	a, err := newPageAppender(p.page(off), false)
+	if err != nil {
+		return err
 	}
-
-	b := make([]byte, 12)
-	for {
-		n, err := irw.Read(b)
-		if err == io.EOF {
-			fmt.Println("write by eof")
-			for i := 0; i < n; i++ {
-				irw.UnreadByte()
-			}
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		val := Value(binary.BigEndian.Uint32(b[:4]))
-		ptr := binary.BigEndian.Uint64(b[4:])
-
-		if val == 0 {
-			fmt.Println("write by 0")
-			// We ran beyond the last pair but there's still room in the current
-			// page. Undo the read.
-			for i := 0; i < 12; i++ {
-				irw.UnreadByte()
-			}
-			break
-		}
-		if val < v {
-			continue
-		}
-		if val == v {
-			if ptr == pointer {
-				return nil
-			}
-			return fmt.Errorf("pointer for value %d already set to %d", v, ptr)
-		}
-		if val > v {
-			return fmt.Errorf("cannot insert smaller value")
-		}
+	err = a.append(v, ptr)
+	if err != errPageFull {
+		return err
 	}
-	binary.BigEndian.PutUint32(b[:4], uint32(v))
-	binary.BigEndian.PutUint64(b[4:], pointer)
-
-	_, err = irw.Write(b)
-	return err
+	// The page couldn't fit the sample. Allocate a new page.
+	// If that one fails too, propagate the error.
+	off, err2 := p.allocatePage(k, v)
+	if err2 != nil {
+		return err2
+	}
+	a, err = newPageAppender(p.page(off), true)
+	if err != nil {
+		return err
+	}
+	return a.append(v, ptr)
 }
 
 func (p *postings) Get(k Key, from, to Value) (Set, error) {
-	fmt.Println("get", k, from, to)
-	offs, err := p.skipTable.RangeOffsets(skiptable.Key(k), skiptable.Value(from), skiptable.Value(to))
+	offsets, err := p.skipTable.RangeOffsets(skiptable.Key(k), skiptable.Value(from), skiptable.Value(to))
 	if err != nil {
 		return nil, fmt.Errorf("skip table: %s", err)
 	}
-
-	var res Set
-
-	irw := &indexRW{
-		data:    p.data,
-		offsets: offs,
-		pos:     1,
+	var pages [][]byte
+	for _, off := range offsets {
+		pages = append(pages, p.page(off))
 	}
 
-	b := make([]byte, 12)
-	for {
-		_, err := irw.Read(b)
-		if err == io.EOF {
-			fmt.Println("eof")
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		val := Value(binary.BigEndian.Uint32(b[:4]))
-		ptr := binary.BigEndian.Uint64(b[4:])
-
-		if val < from {
-			continue
-		}
-		if val > to {
-			fmt.Printf("reached val > to (%d) at %d %d\n", val, irw.block, irw.pos)
-			break
-		}
-
-		res = append(res, Pair{
-			Value: Value(val),
-			Ptr:   ptr,
-		})
-	}
-
-	return res, nil
+	return newIndexReader(pages).findAll(from, to)
 }
 
 func (p *postings) Sync() error {
@@ -271,6 +197,7 @@ func (p *postings) Close() error {
 	return nil
 }
 
+// Intersection returns an intersection set of all input sets.
 func Intersect(sets ...Set) Set {
 	if len(sets) == 0 {
 		return nil
@@ -303,86 +230,246 @@ func intersect(s1, s2 Set) Set {
 	return result
 }
 
-type indexRW struct {
-	allocate func() ([]byte, uint32, error)
-	data     []byte
-	offsets  []uint32
-	block    int
-	pos      int
+type pageEncoding int
+
+const (
+	pageEncodingUint32 = pageEncoding(iota)
+	pageEncodingVarint
+	pageEncodingDelta
+)
+
+// A pageReader reads value/pointer pairs from an index page.
+type pageReader interface {
+	// find returns the offset associated with the given value.
+	// The bool is true iff the value was found.
+	find(v Value) (pointer uint64, found bool)
+	// findRange returns all offset/value pairs with the value
+	// range of min and max.
+	findRange(min, max Value) Set
 }
 
-func (irw *indexRW) Read(b []byte) (n int, err error) {
-	// fmt.Println("read", 12)
-	for i := range b {
-		if b[i], err = irw.ReadByte(); err != nil {
-			return n, err
-		}
-		n++
+// newPageReader returns a pageReader and its encoding based on the
+// given page byte slice.
+func newPageReader(p []byte) (pageReader, pageEncoding, error) {
+	page := bytes.NewBuffer(p)
+
+	enc, err := binary.ReadUvarint(page)
+	if err != nil {
+		fmt.Errorf("reading encoding failed: %s", err)
 	}
-	return n, nil
+
+	switch pageEncoding(enc) {
+	case pageEncodingUint32:
+		return newPageReaderUint32(page.Bytes()), pageEncodingUint32, nil
+	}
+
+	return nil, 0, fmt.Errorf("unknown encoding %q", enc)
 }
 
-func (irw *indexRW) UnreadByte() error {
-	if irw.pos > 0 {
-		irw.pos--
+// A pageReader that stores value/pointer pairs as simple sequences of
+// uint32 and uint64 byte slices.
+type pageReaderUint32 struct {
+	page []byte
+}
+
+func newPageReaderUint32(page []byte) *pageReaderUint32 {
+	return &pageReaderUint32{
+		page: page,
+	}
+}
+
+// find implements the pageReader interface.
+func (p *pageReaderUint32) find(value Value) (uint64, bool) {
+	// The first value is guaranteed to exist and may also be zero.
+	lastVal := Value(binary.BigEndian.Uint32(p.page[:4]))
+	if lastVal == value {
+		return binary.BigEndian.Uint64(p.page[4:12]), true
+	}
+
+	for i := 12; i < len(p.page); i += 12 {
+		val := Value(binary.BigEndian.Uint32(p.page[i : i+4]))
+		if val <= lastVal {
+			break
+		}
+		if val < value {
+			lastVal = val
+			continue
+		}
+		if val == value {
+			return binary.BigEndian.Uint64(p.page[i+4 : i+12]), true
+		}
+		// The index values are monotonically increasing. The value we are
+		// searching for won't follow.
+		if val > value {
+			break
+		}
+	}
+	return 0, false
+}
+
+// findRange implements the pageReader interface.
+func (p *pageReaderUint32) findRange(min, max Value) Set {
+	var set Set
+	// The first value is guaranteed to exist and may also be zero.
+	lastVal := Value(binary.BigEndian.Uint32(p.page[:4]))
+	if lastVal >= min {
+		// The first value was already beyond the range.
+		if lastVal > max {
+			return set
+		}
+		set = append(set, Pair{
+			Value: lastVal,
+			Ptr:   binary.BigEndian.Uint64(p.page[4:12]),
+		})
+	}
+
+	i := 12
+	for ; i < len(p.page); i += 12 {
+		val := Value(binary.BigEndian.Uint32(p.page[i : i+4]))
+		if val <= lastVal {
+			// The index ended.
+			return set
+		}
+		if val < min {
+			lastVal = val
+			continue
+		}
+		if val <= max {
+			// First value in range found. Add the offset to our results and continue
+			// with the second loop.
+			set = append(set, Pair{
+				Value: val,
+				Ptr:   binary.BigEndian.Uint64(p.page[i+4 : i+12]),
+			})
+			break
+		}
+		// The min/max interval didn't include any value.
+		return set
+	}
+
+	for ; i < len(p.page); i += 12 {
+		val := Value(binary.BigEndian.Uint32(p.page[i : i+4]))
+		if val <= lastVal {
+			break
+		}
+		if val > max {
+			break
+		}
+		set = append(set, Pair{
+			Value: val,
+			Ptr:   binary.BigEndian.Uint64(p.page[i+4 : i+12]),
+		})
+	}
+
+	return set
+}
+
+// indexReader reads value/pointer pairs from index pages.
+type indexReader struct {
+	pages [][]byte
+}
+
+func newIndexReader(pages [][]byte) *indexReader {
+	return &indexReader{
+		pages: pages,
+	}
+}
+
+var ErrNotFound = errors.New("not found")
+
+// find returns the pointer associated with value. If the value is
+// not in the index ErrNotFound is returned.
+func (r *indexReader) find(value Value) (uint64, error) {
+	for _, page := range r.pages {
+		pr, _, err := newPageReader(page)
+		if err != nil {
+			return 0, err
+		}
+		if ptr, ok := pr.find(value); ok {
+			return ptr, nil
+		}
+	}
+	return 0, ErrNotFound
+}
+
+// findAll returns the set of all value/pointer pairs in the index
+// that are within the value range of min and max.
+func (r *indexReader) findAll(min, max Value) (set Set, err error) {
+	for _, page := range r.pages {
+		pr, _, err := newPageReader(page)
+		if err != nil {
+			return nil, err
+		}
+		set = append(set, pr.findRange(min, max)...)
+	}
+	return set, nil
+}
+
+// pageAppender can append values to a page.
+type pageAppender interface {
+	append(Value, uint64) error
+}
+
+// newPageAppender returns a pageAppender for the page's encoding. The fresh
+// flag indicates whether the underlying page was newly created.
+func newPageAppender(p []byte, fresh bool) (pageAppender, error) {
+	page := bytes.NewBuffer(p)
+
+	enc, err := binary.ReadUvarint(page)
+	if err != nil {
+		fmt.Errorf("reading encoding failed: %s", err)
+	}
+
+	switch pageEncoding(enc) {
+	case pageEncodingUint32:
+		return newPageAppenderUint32(page.Bytes(), fresh), nil
+	}
+
+	return nil, fmt.Errorf("unknown encoding %q", enc)
+}
+
+type pageAppenderUint32 struct {
+	page  []byte
+	fresh bool
+}
+
+var errPageFull = errors.New("page full")
+
+func newPageAppenderUint32(p []byte, fresh bool) *pageAppenderUint32 {
+	return &pageAppenderUint32{
+		page:  p,
+		fresh: fresh,
+	}
+}
+
+// append implements the pageAppender interface.
+func (a *pageAppenderUint32) append(value Value, ptr uint64) error {
+	if a.fresh {
+		if len(a.page) < 12 {
+			return errPageFull
+		}
+		binary.BigEndian.PutUint32(a.page[:4], uint32(value))
+		binary.BigEndian.PutUint64(a.page[4:12], ptr)
+
+		a.fresh = false
 		return nil
 	}
-	if irw.block == 0 {
-		return fmt.Errorf("cannot unread from zero position")
-	}
-	irw.block--
-	irw.pos = indexBlockSize - 1
-	return nil
-}
+	// The first value is guaranteed to exist and may also be zero.
+	lastVal := binary.BigEndian.Uint32(a.page[:4])
 
-func (irw *indexRW) ReadByte() (byte, error) {
-	if irw.pos == indexBlockSize {
-		if irw.block == len(irw.offsets)-1 {
-			return 0, io.EOF
+	i := 12
+	// Skip through all values that are already set.
+	for ; i < len(a.page); i += 12 {
+		val := binary.BigEndian.Uint32(a.page[i : i+4])
+		if val <= lastVal {
+			break
 		}
-		// First byte is reserved.
-		irw.pos = 1
-		irw.block++
 	}
-	// fmt.Println("access offset", irw.offsets, irw.block)
-	offset := irw.offsets[irw.block]
-	c := irw.data[offset*indexBlockSize+uint32(irw.pos)]
-	irw.pos++
-
-	return c, nil
-}
-
-func (irw *indexRW) Write(b []byte) (n int, err error) {
-	fmt.Println("write", b, irw.offsets[irw.block], irw.pos)
-	for _, c := range b {
-		if err = irw.WriteByte(c); err != nil {
-			return n, err
-		}
-		n++
+	if i+12 > len(a.page) {
+		return errPageFull
 	}
-	return n, nil
-}
-
-func (irw *indexRW) WriteByte(c byte) error {
-	// fmt.Println("writeb", c, irw.pos, irw.offsets[irw.block], indexBlockSize)
-	if irw.pos == indexBlockSize {
-		if irw.block == len(irw.offsets)-1 {
-			d, off, err := irw.allocate()
-			if err != nil {
-				return err
-			}
-			irw.data = d
-			irw.offsets = append(irw.offsets, off)
-		}
-		irw.block++
-		irw.pos = 1
-		fmt.Println(irw.block, irw.offsets)
-	}
-
-	offset := irw.offsets[irw.block]
-	irw.data[offset*indexBlockSize+uint32(irw.pos)] = c
-
-	irw.pos++
+	binary.BigEndian.PutUint32(a.page[i:i+4], uint32(value))
+	binary.BigEndian.PutUint64(a.page[i+4:i+12], ptr)
 
 	return nil
 }
