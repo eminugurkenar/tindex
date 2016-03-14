@@ -48,7 +48,7 @@ type Opts struct {
 // They result in block files of 8MB each.
 var DefaultOpts = Opts{
 	BlockRows:       1 << 15,
-	BlockLineLength: 1 << 8,
+	BlockLineLength: 1 << 7,
 }
 
 func New(dir string, opts Opts) (*SkipTable, error) {
@@ -184,6 +184,39 @@ func (st *SkipTable) row(k Key) (int, int) {
 
 var ErrNotFound = errors.New("not found")
 
+func findRangeUint32(l *line, from, to Value) ([]uint32, error) {
+	first, err := findUint32(l, from)
+	if err != nil {
+		return nil, err
+	}
+	var allOffsets []uint32
+	allOffsets = append(allOffsets, first)
+
+	b := make([]byte, 8)
+	for {
+		_, err := l.Read(b)
+		// If we've reached the end of the skip list the last offset is
+		// our last value
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		// If the value is larger than what we are searching for, the last
+		// offset is the closest result.
+		value := Value(binary.BigEndian.Uint32(b[:4]))
+		if value > to {
+			break
+		}
+		off := binary.BigEndian.Uint32(b[4:])
+
+		allOffsets = append(allOffsets, off)
+	}
+
+	return allOffsets, nil
+}
+
 func findUint32(l *line, v Value) (uint32, error) {
 	b := make([]byte, 8)
 
@@ -212,7 +245,7 @@ func findUint32(l *line, v Value) (uint32, error) {
 		// If the value is larger than what we are searching for, the last
 		// offset is the closest result.
 		value := Value(binary.BigEndian.Uint32(b[:4]))
-		if value > v {
+		if value > v || value == 0 {
 			break
 		}
 		lastOffset = binary.BigEndian.Uint32(b[4:])
@@ -272,6 +305,36 @@ func storeUint32(l *line, v Value, offset uint32) error {
 	return err
 }
 
+func (st *SkipTable) RangeOffsets(k Key, from, to Value) ([]uint32, error) {
+	br, bo := st.row(k)
+
+	if br >= len(st.blocks) {
+		return nil, ErrNotFound
+	}
+
+	l := &line{
+		blocks:     st.blocks[br],
+		offset:     bo,
+		lineLength: st.opts.BlockLineLength,
+	}
+
+	// Read the byte specifying the line encoding.
+	c, err := l.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	switch c {
+	case lineUnused:
+		return nil, ErrNotFound
+	case lineEncUint32:
+		return findRangeUint32(l, from, to)
+	}
+
+	return nil, fmt.Errorf("unknown line encoding %q", c)
+
+}
+
 func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
 	br, bo := st.row(k)
 
@@ -284,7 +347,6 @@ func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
 		offset:     bo,
 		lineLength: st.opts.BlockLineLength,
 	}
-
 	// Read the byte specifying the line encoding.
 	c, err := l.ReadByte()
 	if err != nil {
