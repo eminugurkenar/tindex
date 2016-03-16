@@ -148,7 +148,7 @@ func generateData(n int, maxKey uint32) []testData {
 
 	for i := range data {
 		data[i].k = Key(rand.Intn(int(maxKey)))
-		data[i].v = Value(i*10 + rand.Intn(5))
+		data[i].v = Value(100000 + i*3 + rand.Intn(3))
 		data[i].offset = uint64(rand.Int63n(1000))
 	}
 
