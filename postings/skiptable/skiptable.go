@@ -95,8 +95,6 @@ func (st *SkipTable) blockFileSize() int64 {
 }
 
 func (st *SkipTable) allocateBlock(row, col int) error {
-	fmt.Println("allocate block")
-
 	if row > len(st.blocks) {
 		return fmt.Errorf("inconsistent allocation row")
 	} else if row == len(st.blocks) {
@@ -237,6 +235,24 @@ func (st *SkipTable) Store(k Key, start Value, offset uint64) error {
 	if err != nil {
 		return err
 	}
+	err = a.append(start, offset)
+	if err != errLineFull {
+		return err
+	}
+
+	// The line was full. Allocate a new block for the line and try again.
+	br, _ := st.row(k)
+	if err := st.allocateBlock(br, len(st.blocks[br])); err != nil {
+		return err
+	}
+	line, err = st.rawLine(k, true)
+	if err != nil {
+		return err
+	}
+	a, err = newLineAppender(line)
+	if err != nil {
+		return err
+	}
 	return a.append(start, offset)
 }
 
@@ -351,7 +367,7 @@ func (r *lineReaderVarint) find(value Value) (uint64, error) {
 		}
 		// We reached the end or stepped beyond the searched value.
 		// The last offset is what we are looking for.
-		if Value(val) > value || val < lastVal {
+		if Value(val) > value || val == 0 {
 			break
 		}
 		lastVal = val
@@ -388,7 +404,7 @@ func (r *lineReaderVarint) findRange(min, max Value) (offsets []uint64, err erro
 		}
 		// Values in the skiplist must be strictly monotonically increasing.
 		// This signals the end.
-		if val < lastVal {
+		if val == 0 {
 			return append(offsets, lastOff), nil
 		}
 		// If the value is larger than the minimum, the the previous pair
@@ -418,7 +434,7 @@ func (r *lineReaderVarint) findRange(min, max Value) (offsets []uint64, err erro
 		}
 		// We reached the end or stepped beyond max. The previous offset
 		// is the last relevant one.
-		if Value(val) > max || val < lastVal {
+		if Value(val) > max || val == 0 {
 			break
 		}
 		lastVal = val
@@ -511,20 +527,15 @@ func (a *lineAppenderVarint) append(value Value, offset uint64) error {
 			}
 			return err
 		}
-		// Consume and discard offset
-		_, m, err := readUvarint(a.line)
-		if err != nil {
-			return err
-		}
-		//
-		if val < lastVal {
+
+		if val == 0 {
 			// Ensure sufficient space so we don't have to unwrite and
 			// a new line segment is allocated.
 			if a.line.Len() < 2*binary.MaxVarintLen64 {
 				return errLineFull
 			}
 			// Jump back to where the last varint started
-			if _, err := a.line.Seek(int64(-n-m), 1); err != nil {
+			if _, err := a.line.Seek(int64(-n), 1); err != nil {
 				return err
 			}
 			if _, err := writeUvarint(a.line, uint64(value)); err != nil {
@@ -534,6 +545,10 @@ func (a *lineAppenderVarint) append(value Value, offset uint64) error {
 				return err
 			}
 			return nil
+		}
+		// Consume and discard offset.
+		if _, _, err = readUvarint(a.line); err != nil {
+			return err
 		}
 
 		lastVal = val
@@ -656,7 +671,6 @@ func (rw *blockLineRW) WriteByte(c byte) error {
 }
 
 func (rw *blockLineRW) Write(b []byte) (n int, err error) {
-	fmt.Println("write %v at %d", b, rw.i)
 	// Writes are rare. We just reuse WriteByte for simplicity.
 	for _, c := range b {
 		if err = rw.WriteByte(c); err != nil {

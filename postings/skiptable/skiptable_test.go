@@ -182,8 +182,8 @@ func TestSkipTableStore(t *testing.T) {
 	}
 
 	table, err := New(dir, Opts{
-		BlockRows:       1,
-		BlockLineLength: 128,
+		BlockRows:       4096,
+		BlockLineLength: 512,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestSkipTableStore(t *testing.T) {
 	defer table.Close()
 	defer hexdump(t, table)
 
-	data := generateData(1500, 1)
+	data := generateData(1000000, 10000)
 
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
@@ -227,6 +227,7 @@ func BenchmarkSkipTableStore(b *testing.B) {
 	defer table.Close()
 
 	data := generateData(int(b.N), uint32(b.N)/50+1)
+	fmt.Println(int(b.N), uint32(b.N)/50+1)
 
 	b.ResetTimer()
 
@@ -252,7 +253,7 @@ func BenchmarkSkipTableOffset(b *testing.B) {
 	defer table.Close()
 
 	data := generateData(int(b.N), uint32(b.N)/50+1)
-
+	fmt.Println(int(b.N), uint32(b.N)/50+1)
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
 			b.Fatal(err)
