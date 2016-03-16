@@ -182,8 +182,8 @@ func testSkipTableStore(t *testing.T, enc lineEncoding) {
 	}
 
 	table, err := New(dir, Opts{
-		BlockRows:       4096,
-		BlockLineLength: 512,
+		BlockRows:       256,
+		BlockLineLength: 256,
 		DefaultEncoding: enc,
 	})
 	if err != nil {
@@ -219,7 +219,7 @@ func TestSkipTableStoreDelta(t *testing.T) {
 	testSkipTableStore(t, lineEncodingDelta)
 }
 
-func BenchmarkSkipTableStore(b *testing.B) {
+func benchSkipTableStore(b *testing.B, enc lineEncoding) {
 	dir, err := ioutil.TempDir("", "skiptable_test")
 	if err != nil {
 		b.Fatal(err)
@@ -227,7 +227,8 @@ func BenchmarkSkipTableStore(b *testing.B) {
 
 	table, err := New(dir, Opts{
 		BlockRows:       4096,
-		BlockLineLength: 512,
+		BlockLineLength: 128,
+		DefaultEncoding: enc,
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -235,7 +236,6 @@ func BenchmarkSkipTableStore(b *testing.B) {
 	defer table.Close()
 
 	data := generateData(int(b.N), uint32(b.N)/50+1)
-	fmt.Println(int(b.N), uint32(b.N)/50+1)
 
 	b.ResetTimer()
 
@@ -245,7 +245,16 @@ func BenchmarkSkipTableStore(b *testing.B) {
 		}
 	}
 }
-func BenchmarkSkipTableOffset(b *testing.B) {
+
+func BenchmarkSkipTableStoreVarint(b *testing.B) {
+	benchSkipTableStore(b, lineEncodingVarint)
+}
+
+func BenchmarkSkipTableStoreDelta(b *testing.B) {
+	benchSkipTableStore(b, lineEncodingDelta)
+}
+
+func benchSkipTableOffset(b *testing.B, enc lineEncoding) {
 	dir, err := ioutil.TempDir("", "skiptable_test")
 	if err != nil {
 		b.Fatal(err)
@@ -253,7 +262,8 @@ func BenchmarkSkipTableOffset(b *testing.B) {
 
 	table, err := New(dir, Opts{
 		BlockRows:       4096,
-		BlockLineLength: 512,
+		BlockLineLength: 128,
+		DefaultEncoding: enc,
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -261,7 +271,6 @@ func BenchmarkSkipTableOffset(b *testing.B) {
 	defer table.Close()
 
 	data := generateData(int(b.N), uint32(b.N)/50+1)
-	fmt.Println(int(b.N), uint32(b.N)/50+1)
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
 			b.Fatal(err)
@@ -277,4 +286,12 @@ func BenchmarkSkipTableOffset(b *testing.B) {
 		}
 		_ = offset
 	}
+}
+
+func BenchmarkSkipTableOffsetVarint(b *testing.B) {
+	benchSkipTableOffset(b, lineEncodingVarint)
+}
+
+func BenchmarkSkipTableOffsetDelta(b *testing.B) {
+	benchSkipTableOffset(b, lineEncodingDelta)
 }

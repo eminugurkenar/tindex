@@ -233,7 +233,7 @@ func (st *SkipTable) Store(k Key, start Value, offset uint64) error {
 	if err != nil {
 		return err
 	}
-	a, err := newLineAppender(line)
+	a, err := newLineAppender(line, st.opts.DefaultEncoding)
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func (st *SkipTable) Store(k Key, start Value, offset uint64) error {
 	if err != nil {
 		return err
 	}
-	a, err = newLineAppender(line)
+	a, err = newLineAppender(line, st.opts.DefaultEncoding)
 	if err != nil {
 		return err
 	}
@@ -598,7 +598,7 @@ type lineAppender interface {
 	append(value Value, offset uint64) error
 }
 
-func newLineAppender(line *rawLine) (lineAppender, error) {
+func newLineAppender(line *rawLine, defEncoding lineEncoding) (lineAppender, error) {
 	e, _, err := readUvarint(line)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read encoding varint")
@@ -608,7 +608,8 @@ func newLineAppender(line *rawLine) (lineAppender, error) {
 	var fresh = false
 	// If the line is still fresh, set an encoding to use.
 	if enc == lineEncodingUnused {
-		enc = lineEncodingVarint
+		enc = defEncoding
+
 		fresh = true
 		if _, err := line.Seek(0, 0); err != nil {
 			return nil, err
@@ -621,6 +622,8 @@ func newLineAppender(line *rawLine) (lineAppender, error) {
 	switch enc {
 	case lineEncodingVarint:
 		return newLineAppenderVarint(line, fresh), nil
+	case lineEncodingDelta:
+		return newLineAppenderDelta(line, fresh), nil
 	}
 
 	return nil, fmt.Errorf("unknown line encoding %q", enc)
@@ -733,6 +736,7 @@ func (a *lineAppenderDelta) append(value Value, offset uint64) error {
 			return errOutOfOrder
 		}
 		dVal, n, err := readVarint(a.line)
+
 		if err != nil {
 			if err == io.EOF {
 				return errLineFull
@@ -741,7 +745,7 @@ func (a *lineAppenderDelta) append(value Value, offset uint64) error {
 		}
 		val := uint64(int64(lastVal) + dVal)
 
-		if val == 0 {
+		if dVal == 0 {
 			// Ensure sufficient space so we don't have to unwrite and
 			// a new line segment is allocated.
 			if a.line.Len() < 2*binary.MaxVarintLen64 {
