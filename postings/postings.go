@@ -436,7 +436,10 @@ type pageAppenderUint32 struct {
 	fresh bool
 }
 
-var errPageFull = errors.New("page full")
+var (
+	errPageFull   = errors.New("page full")
+	errOutOfOrder = errors.New("out of order")
+)
 
 func newPageAppenderUint32(p []byte, fresh bool) *pageAppenderUint32 {
 	return &pageAppenderUint32{
@@ -464,6 +467,9 @@ func (a *pageAppenderUint32) append(value Value, ptr uint64) error {
 	// Skip through all values that are already set.
 	for ; i < len(a.page); i += 12 {
 		val := binary.BigEndian.Uint32(a.page[i : i+4])
+		if val >= value {
+			return errOutOfOrder
+		}
 		if val <= lastVal {
 			break
 		}

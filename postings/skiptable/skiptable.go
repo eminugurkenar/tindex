@@ -1,6 +1,7 @@
 package skiptable
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -20,11 +21,6 @@ type Key uint32
 type Value uint32
 
 type Set []Value
-
-const (
-	lineUnused    = '\x00'
-	lineEncUint32 = '\x01'
-)
 
 type SkipTable struct {
 	files  []*os.File
@@ -182,229 +178,82 @@ func (st *SkipTable) row(k Key) (int, int) {
 	return br, bo
 }
 
-var ErrNotFound = errors.New("not found")
-
-func findRangeUint32(l *line, from, to Value) ([]uint32, error) {
-	first, err := findUint32(l, from)
-	if err != nil {
-		return nil, err
-	}
-	var allOffsets []uint32
-	allOffsets = append(allOffsets, first)
-
-	b := make([]byte, 8)
-	for {
-		_, err := l.Read(b)
-		// If we've reached the end of the skip list the last offset is
-		// our last value
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		// If the value is larger than what we are searching for, the last
-		// offset is the closest result.
-		value := Value(binary.BigEndian.Uint32(b[:4]))
-		if value > to || value == 0 {
-			break
-		}
-		off := binary.BigEndian.Uint32(b[4:])
-
-		allOffsets = append(allOffsets, off)
-	}
-
-	return allOffsets, nil
-}
-
-func findUint32(l *line, v Value) (uint32, error) {
-	b := make([]byte, 8)
-
-	if _, err := l.Read(b); err != nil {
-		return 0, err
-	}
-	// The initial val/offset pair is always set.
-	lastOffset := binary.BigEndian.Uint32(b[4:])
-
-	// The first entry might already be higher than what we are looking for.
-	// In that case the first relevant values are at this offset.
-	if Value(binary.BigEndian.Uint32(b[:4])) >= v {
-		return lastOffset, nil
-	}
-
-	for {
-		_, err := l.Read(b)
-		// If we've reached the end of the skip list the last offset is
-		// our result.
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return 0, err
-		}
-		// If the value is larger than what we are searching for, the last
-		// offset is the closest result.
-		value := Value(binary.BigEndian.Uint32(b[:4]))
-		if value > v || value == 0 {
-			break
-		}
-		lastOffset = binary.BigEndian.Uint32(b[4:])
-		if value == v {
-			break
-		}
-	}
-
-	return lastOffset, nil
-}
-
-func initUint32(l *line, v Value, offset uint32) error {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint32(b[:4], uint32(v))
-	binary.BigEndian.PutUint32(b[4:], offset)
-
-	_, err := l.Write(b)
-	return err
-}
-
-func storeUint32(l *line, v Value, offset uint32) error {
-	b := make([]byte, 8)
-
-	n, err := l.Read(b)
-	if err != nil {
-		return err
-	}
-	// The initial val/offset pair is always set but we don't need it.
-
-	for {
-		n, err = l.Read(b)
-		// If we've reached the end of the skip list the last offset is
-		// our result.
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		// If the value is larger than what we are searching for, the last
-		// offset is the closest result.
-		if Value(binary.BigEndian.Uint32(b[:4])) == 0 {
-			break
-		}
-	}
-	for n > 0 {
-		n--
-		if err = l.UnreadByte(); err != nil {
-			return err
-		}
-	}
-
-	binary.BigEndian.PutUint32(b[:4], uint32(v))
-	binary.BigEndian.PutUint32(b[4:], offset)
-
-	_, err = l.Write(b)
-	return err
-}
-
-func (st *SkipTable) RangeOffsets(k Key, from, to Value) ([]uint32, error) {
+func (st *SkipTable) getLine(k Key, create bool) ([]byte, error) {
 	br, bo := st.row(k)
 
-	if br >= len(st.blocks) {
+	if create {
+		for br >= len(st.blocks) {
+			if err := st.allocateBlock(len(st.blocks), 0); err != nil {
+				return nil, err
+			}
+		}
+	} else if br >= len(st.blocks) {
 		return nil, ErrNotFound
 	}
 
-	l := &line{
-		blocks:     st.blocks[br],
-		offset:     bo,
-		lineLength: st.opts.BlockLineLength,
+	line := make([]byte, 0, st.opts.BlockLineLength*len(st.blocks[br]))
+	for _, block := range st.blocks[br] {
+		line = append(line, []byte(block[bo:bo+st.opts.BlockLineLength])...)
 	}
 
-	// Read the byte specifying the line encoding.
-	c, err := l.ReadByte()
+	return line, nil
+}
+
+var ErrNotFound = errors.New("not found")
+
+func (st *SkipTable) RangeOffsets(k Key, min, max Value) ([]uint32, error) {
+	line, err := st.getLine(k, false)
+	if err != nil {
+		return nil, err
+	}
+	r, err := newLineReader(line)
 	if err != nil {
 		return nil, err
 	}
 
-	switch c {
-	case lineUnused:
-		return nil, ErrNotFound
-	case lineEncUint32:
-		return findRangeUint32(l, from, to)
-	}
-
-	return nil, fmt.Errorf("unknown line encoding %q", c)
-
+	return rw.findRange(min, max), nil
 }
 
 func (st *SkipTable) Offset(k Key, v Value) (uint32, error) {
-	br, bo := st.row(k)
-
-	if br >= len(st.blocks) {
-		return 0, ErrNotFound
+	line, err := st.getLine(k, false)
+	if err != nil {
+		return 0, err
 	}
-
-	l := &line{
-		blocks:     st.blocks[br],
-		offset:     bo,
-		lineLength: st.opts.BlockLineLength,
-	}
-	// Read the byte specifying the line encoding.
-	c, err := l.ReadByte()
+	r, err := newLineReader(line)
 	if err != nil {
 		return 0, err
 	}
 
-	switch c {
-	case lineUnused:
-		return 0, ErrNotFound
-	case lineEncUint32:
-		return findUint32(l, v)
-	}
-
-	return 0, fmt.Errorf("unknown line encoding %q", c)
+	return rw.find(v), nil
 }
 
 func (st *SkipTable) Store(k Key, start Value, offset uint32) error {
-	br, bo := st.row(k)
-
-	for len(st.blocks) <= br {
-		if err := st.allocateBlock(len(st.blocks), 0); err != nil {
-			return err
-		}
+	line, err := st.getLine(k, true)
+	if err != nil {
+		return err
 	}
-
-	l := &line{
-		blocks:     st.blocks[br],
-		offset:     bo,
-		lineLength: st.opts.BlockLineLength,
-		allocate: func(col int) (mmap.MMap, error) {
-			err := st.allocateBlock(br, col)
-			if err != nil {
-				return nil, err
-			}
-			return st.blocks[br][col], nil
-		},
+	a, err := newLineAppender(line)
+	if err != nil {
+		return err
 	}
-
-	// Read the byte specifying the line encoding.
-	c, err := l.ReadByte()
+	b, i, err := a.append(start, offset)
 	if err != nil {
 		return err
 	}
 
-	switch c {
-	case lineUnused:
-		if err := l.UnreadByte(); err != nil {
-			return err
-		}
-		if err := l.WriteByte(lineEncUint32); err != nil {
-			return err
-		}
-		return initUint32(l, start, offset)
-	case lineEncUint32:
-		return storeUint32(l, start, offset)
-	}
+	// Insert the new bytes b at position i.
+	// TODO(fabxc): this is a bit hacky for now. We've to figure out whether
+	// to pass down the original blocks into the readerw.
+	br, bo := st.row(k)
 
-	return fmt.Errorf("unknown line encoding %q", c)
+	fmt.Println(b, i)
+	_, n := binary.Varint([]byte(st.blocks[br][0][bo:]))
+	i += n
+
+	block := st.blocks[br][i/st.opts.BlockLineLength]
+	copy([]byte(block[bo+i%st.opts.BlockLineLength:bo+i%st.opts.BlockLineLength+len(b)]), b)
+
+	return nil
 }
 
 func (st *SkipTable) Sync() error {
@@ -443,84 +292,316 @@ func (st *SkipTable) Close() error {
 	return nil
 }
 
-type line struct {
-	allocate   func(col int) (mmap.MMap, error)
-	blocks     []mmap.MMap
-	col        int
-	offset     int
-	pos        int
-	lineLength int
+type lineReader interface {
+	find(v Value) (offset uint32)
+	findRange(min, max Value) (offsets []uint32)
 }
 
-func (l *line) UnreadByte() error {
-	if l.pos > 0 {
-		l.pos--
-		return nil
+type lineEncoding int
+
+const (
+	lineEncodingUnused = lineEncoding(iota)
+	lineEncodingUint
+	lineEncodingVarint
+	lineEncodingDelta
+)
+
+// newLineReader reads a line of skipentries.
+//
+// TODO(fabxc): investigate whether not constructing the entire line but pass down
+// the blocks, offset, and line length instead has relevant performance implications.
+func newLineReader(line []byte) (lineReader, error) {
+	e, n := binary.Uvarint(line)
+	if n == 0 {
+		return nil, fmt.Errorf("unable to read encoding varint")
 	}
-	if l.col == 0 {
-		return fmt.Errorf("cannot unread from zero position")
+	enc := lineEncoding(e)
+
+	switch enc {
+	case lineEncodingUnused:
+		return nil, ErrNotFound
+	case lineEncodingUint:
+		return newLineReaderUint(line[n:]), nil
 	}
-	l.col--
-	l.pos = l.lineLength - 1
-	return nil
+
+	return nil, fmt.Errorf("unknown line encoding %q", enc)
 }
 
-func (l *line) Read(b []byte) (n int, err error) {
-	for i := range b {
-		if b[i], err = l.ReadByte(); err != nil {
-			return n, err
+type lineReaderUint struct {
+	line []byte
+}
+
+func newLineReaderUint(line []byte) *lineReaderUint {
+	return &lineReaderUint{
+		line: line,
+	}
+}
+
+// find implements the lineReader interface.
+func (r *lineReaderUint) find(value Value) uint32 {
+	off, _ := rw.findWithPos(value)
+	return off
+}
+
+// findWithPos returns the offset for the value and the position of the
+// next byte to read.
+func (r *lineReaderUint) findWithPos(value Value) (uint32, int) {
+	// The first value is guaranteed to exist and may also be zero.
+	lastValue := Value(binary.BigEndian.Uint32(rw.line[:4]))
+
+	i := 8
+	for ; i+8 < len(rw.line); i += 8 {
+		if value == lastValue {
+			break
 		}
-		n++
-	}
-	return n, nil
-}
-
-func (l *line) Write(b []byte) (n int, err error) {
-	for _, c := range b {
-		if err = l.WriteByte(c); err != nil {
-			return n, err
+		val := Value(binary.BigEndian.Uint32(rw.line[:4]))
+		// Values in the skiplist must be monotonically increasing.
+		// This signals the end.
+		if val > value || val < lastValue {
+			break
 		}
-		n++
+
+		lastValue = val
 	}
-	return n, err
+
+	return binary.BigEndian.Uint32(rw.line[i-4 : i]), i
 }
 
-func (l *line) ReadByte() (byte, error) {
-	if l.col == len(l.blocks) {
+// findRange implements the lineReader itnerface.
+func (r *lineReaderUint) findRange(min, max Value) (offsets []uint32) {
+	first, i := rw.findWithPos(min)
+	offsets = append(offsets, first)
+
+	lastVal := Value(binary.BigEndian.Uint32(rw.line[i-8 : i-4]))
+
+	for ; i+8 < len(rw.line); i += 8 {
+		val := Value(binary.BigEndian.Uint32(rw.line[:4]))
+		if val < lastVal || val > max {
+			break
+		}
+		offsets = append(offsets, binary.BigEndian.Uint32(rw.line[i+4:i+8]))
+	}
+
+	return offsets
+}
+
+var (
+	errLineFull   = errors.New("line full")
+	errOutOfOrder = errors.New("out of order")
+)
+
+// lineAppender adds an offset entry to a skiplist line.
+type lineAppender interface {
+	append(value Value, offset uint32) ([]byte, int, error)
+}
+
+func newLineAppender(line []byte) (lineAppender, error) {
+	e, n := binary.Uvarint(line)
+	if n == 0 {
+		return nil, fmt.Errorf("unable to read encoding varint")
+	}
+	enc := lineEncoding(e)
+
+	var fresh = false
+	// If the line is still fresh, set an encoding to use.
+	if enc == lineEncodingUnused {
+		enc = lineEncodingUint
+		fresh = true
+		n = binary.PutUvarint(line, uint64(enc))
+	}
+
+	switch lineEncoding(enc) {
+	case lineEncodingUint:
+		return newLineAppenderUint(line[n:], fresh), nil
+	}
+
+	return nil, fmt.Errorf("unknown line encoding %q", enc)
+}
+
+// lineAppenderUint implements a lineAppender where values are unicoded
+// as a sequence of uint32 big-endian value/offset pairs.
+type lineAppenderUint struct {
+	line  []byte
+	fresh bool
+}
+
+func newLineAppenderUint(line []byte, fresh bool) *lineAppenderUint {
+	return &lineAppenderUint{
+		line:  line,
+		fresh: fresh,
+	}
+}
+
+// append implements the lineAppender interface.
+func (a *lineAppenderUint) append(value Value, offset uint32) ([]byte, int, error) {
+	if a.fresh {
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint32(b[:4], uint32(value))
+		binary.BigEndian.PutUint32(b[4:8], offset)
+
+		a.fresh = false
+
+		return b, 0, nil
+	}
+
+	var lastValue Value
+	for i := 0; i+8 < len(a.line); i += 8 {
+		val := Value(binary.BigEndian.Uint32(a.line[:4]))
+		// If there's an entry to something larger than our current value,
+		// the order is violated.
+		if val >= value {
+			return nil, 0, errOutOfOrder
+		}
+		// Values in the skiplist must be monotonically increasing.
+		// This signals the end.
+		if i > 0 && val < lastValue {
+			b := make([]byte, 8)
+			binary.BigEndian.PutUint32(b[:4], uint32(value))
+			binary.BigEndian.PutUint32(b[4:8], offset)
+			return b, i, nil
+		}
+
+		lastValue = val
+	}
+
+	return nil, 0, errLineFull
+}
+
+type blockLineRW struct {
+	bl     [][]byte // Original data blocks.
+	offset int64    // Offset to line segment start in each block.
+	length int64    // Line length per block.
+	exp    []byte   // Copy of the line across blocks.
+	i      int64    // Current position.
+}
+
+func newBlockLineRW(bl [][]byte, off, length int64) *blockLineRW {
+	var (
+		n   = 0
+		exp = make([]byte, len(bl)*length)
+	)
+	for i, b := range bl {
+		n += copy(exp[n:], b[off:off+length])
+	}
+	return &blockLineRW{
+		Reader: bytes.NewReader(exp),
+		bl:     bl,
+		offset: off,
+		length: length,
+	}
+}
+
+// Len returns the number of bytes of the unread portion of the
+// slice.
+func (r *Reader) Len() int {
+	if rw.i >= int64(len(rw.exp)) {
+		return 0
+	}
+	return int(int64(len(rw.exp)) - rw.i)
+}
+
+// Size returns the original length of the underlying byte slice.
+// Size is the number of bytes available for reading via ReadAt.
+// The returned value is always the same and is not affected by calls
+// to any other method.
+func (rw *blockLineRW) Size() int64 { return int64(len(rw.exp)) }
+
+func (rw *blockLineRW) Read(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	if rw.i >= int64(len(rw.exp)) {
 		return 0, io.EOF
 	}
-	b := l.blocks[l.col]
-	if l.pos == l.lineLength {
-		l.col++
-		l.pos = 0
-		return l.ReadByte()
-	}
-	c := b[l.offset+l.pos]
-	l.pos++
-	return c, nil
+	n = copy(b, rw.exp[rw.i:])
+	rw.i += int64(n)
+	return
 }
 
-func (l *line) WriteByte(c byte) error {
-	var b mmap.MMap
-	var err error
-	if l.pos == l.lineLength {
-		l.pos = 0
-		l.col++
-		if l.col == len(l.blocks) {
-			b, err = l.allocate(l.col)
-			if err != nil {
-				return err
-			}
-			l.blocks = append(l.blocks, b)
-		} else {
-			b = l.blocks[l.col]
-		}
-	} else {
-		b = l.blocks[l.col]
+func (rw *blockLineRW) ReadAt(b []byte, off int64) (n int, err error) {
+	// Cannot modify state - see io.ReaderAt.
+	if off < 0 {
+		return 0, errors.New("negative offset")
 	}
+	if off >= int64(len(rw.exp)) {
+		return 0, io.EOF
+	}
+	n = copy(b, rw.exp[off:])
+	if n < len(b) {
+		err = io.EOF
+	}
+	return
+}
 
-	b[l.offset+l.pos] = c
-	l.pos++
+func (rw *blockLineRW) ReadByte() (byte, error) {
+	if rw.i >= int64(len(rw.exp)) {
+		return 0, io.EOF
+	}
+	b := rw.exp[rw.i]
+	rw.i++
+	return b, nil
+}
 
+func (rw *blockLineRW) UnreadByte() error {
+	if rw.i <= 0 {
+		return errors.New("at beginning of slice")
+	}
+	rw.i--
 	return nil
+}
+
+// Seek implements the io.Seeker interface.
+func (rw *blockLineRW) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case 0:
+		abs = offset
+	case 1:
+		abs = int64(rw.i) + offset
+	case 2:
+		abs = int64(len(rw.exp)) + offset
+	default:
+		return 0, errors.New("invalid whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("negative position")
+	}
+	rw.i = abs
+	return abs, nil
+}
+
+func (rw *blockLineRW) WriteByte(c byte) error {
+	if rw.i >= int64(rw.exp) {
+		return io.EOF
+	}
+	// Write to the expanded copy and the original data.
+	rw.bl[rw.i/rw.length][rw.offset+(rw.i%rw.length)] = c
+	rw.exp[rw.i] = c
+	rw.i++
+	return nil
+}
+
+func (rw *blockLineRW) Write(b []byte) (n int, err error) {
+	// Writes are rare. We just reuse WriteByte for simplicity.
+	for _, c := range b {
+		if err = rw.WriteByte(c); err != nil {
+			return
+		}
+		n++
+	}
+	return
+}
+
+func (rw *blockLineRW) WriteAt(b []byte, offset int64) (n int, err error) {
+	pos := rw.i
+	// Write are rare. We just reuse Seek and Write for simplicity.
+	if err = rw.Seek(offset, 0); err != nil {
+		return
+	}
+	if n, err = rw.Write(b); err != nil {
+		return
+	}
+	// Jump back to original position.
+	err = rw.Seek(rw.i, 0)
+	return
 }

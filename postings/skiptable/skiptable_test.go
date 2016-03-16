@@ -182,18 +182,17 @@ func TestSkipTableStore(t *testing.T) {
 	}
 
 	table, err := New(dir, Opts{
-		BlockRows:       4096,
-		BlockLineLength: 512,
+		BlockRows:       10,
+		BlockLineLength: 128,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer table.Close()
 
-	data := generateData(1000000, 50000)
+	data := generateData(10, 1)
 
 	for _, d := range data {
-		// fmt.Println("store", d)
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
 			t.Fatal(err)
 		}
