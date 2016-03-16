@@ -140,7 +140,7 @@ func TestSkipTableLoad(t *testing.T) {
 type testData struct {
 	k      Key
 	v      Value
-	offset uint32
+	offset uint64
 }
 
 func generateData(n int, maxKey uint32) []testData {
@@ -149,7 +149,7 @@ func generateData(n int, maxKey uint32) []testData {
 	for i := range data {
 		data[i].k = Key(rand.Intn(int(maxKey)))
 		data[i].v = Value(i*10 + rand.Intn(5))
-		data[i].offset = uint32(rand.Int31n(1000))
+		data[i].offset = uint64(rand.Int63n(1000))
 	}
 
 	return data
@@ -182,15 +182,16 @@ func TestSkipTableStore(t *testing.T) {
 	}
 
 	table, err := New(dir, Opts{
-		BlockRows:       10,
+		BlockRows:       1,
 		BlockLineLength: 128,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer table.Close()
+	defer hexdump(t, table)
 
-	data := generateData(10, 1)
+	data := generateData(1500, 1)
 
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
@@ -208,7 +209,6 @@ func TestSkipTableStore(t *testing.T) {
 		}
 	}
 
-	hexdump(t, table)
 }
 
 func BenchmarkSkipTableStore(b *testing.B) {
