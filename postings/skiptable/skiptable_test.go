@@ -175,7 +175,7 @@ func hexdump(t *testing.T, table *SkipTable) {
 	}
 }
 
-func TestSkipTableStore(t *testing.T) {
+func testSkipTableStore(t *testing.T, enc lineEncoding) {
 	dir, err := ioutil.TempDir("", "skiptable_test")
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +184,7 @@ func TestSkipTableStore(t *testing.T) {
 	table, err := New(dir, Opts{
 		BlockRows:       4096,
 		BlockLineLength: 512,
+		DefaultEncoding: enc,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +192,7 @@ func TestSkipTableStore(t *testing.T) {
 	defer table.Close()
 	defer hexdump(t, table)
 
-	data := generateData(1000000, 10000)
+	data := generateData(100000, 1000)
 
 	for _, d := range data {
 		if err := table.Store(d.k, d.v, d.offset); err != nil {
@@ -208,7 +209,14 @@ func TestSkipTableStore(t *testing.T) {
 			t.Errorf("key: %v, val: %v, offset: %v.\tgot offset: %v", d.k, d.v, d.offset, offset)
 		}
 	}
+}
 
+func TestSkipTableStoreVarint(t *testing.T) {
+	testSkipTableStore(t, lineEncodingVarint)
+}
+
+func TestSkipTableStoreDelta(t *testing.T) {
+	testSkipTableStore(t, lineEncodingDelta)
 }
 
 func BenchmarkSkipTableStore(b *testing.B) {
