@@ -177,7 +177,7 @@ func (st *SkipTable) row(k Key) (int, int) {
 	return br, bo
 }
 
-func (st *SkipTable) rawLine(k Key, create bool) (*blockLineRW, error) {
+func (st *SkipTable) rawLine(k Key, create bool) (*rawLine, error) {
 	br, bo := st.row(k)
 
 	if create {
@@ -309,7 +309,7 @@ const (
 //
 // TODO(fabxc): investigate whether not constructing the entire line but pass down
 // the blocks, offset, and line length instead has relevant performance implications.
-func newLineReader(line *blockLineRW) (lineReader, error) {
+func newLineReader(line *rawLine) (lineReader, error) {
 	e, err := binary.ReadUvarint(line)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read encoding varint: %s", err)
@@ -327,10 +327,10 @@ func newLineReader(line *blockLineRW) (lineReader, error) {
 }
 
 type lineReaderVarint struct {
-	line *blockLineRW
+	line *rawLine
 }
 
-func newLineReaderVarint(line *blockLineRW) *lineReaderVarint {
+func newLineReaderVarint(line *rawLine) *lineReaderVarint {
 	return &lineReaderVarint{line: line}
 }
 
@@ -454,7 +454,7 @@ type lineAppender interface {
 	append(value Value, offset uint64) error
 }
 
-func newLineAppender(line *blockLineRW) (lineAppender, error) {
+func newLineAppender(line *rawLine) (lineAppender, error) {
 	e, _, err := readUvarint(line)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read encoding varint")
@@ -483,11 +483,11 @@ func newLineAppender(line *blockLineRW) (lineAppender, error) {
 }
 
 type lineAppenderVarint struct {
-	line  *blockLineRW
+	line  *rawLine
 	fresh bool
 }
 
-func newLineAppenderVarint(line *blockLineRW, fresh bool) *lineAppenderVarint {
+func newLineAppenderVarint(line *rawLine, fresh bool) *lineAppenderVarint {
 	return &lineAppenderVarint{
 		line:  line,
 		fresh: fresh,
@@ -555,7 +555,7 @@ func (a *lineAppenderVarint) append(value Value, offset uint64) error {
 	}
 }
 
-type blockLineRW struct {
+type rawLine struct {
 	bl     [][]byte // Original data blocks.
 	offset int64    // Offset to line segment start in each block.
 	length int64    // Line length per block.
@@ -564,7 +564,7 @@ type blockLineRW struct {
 	i   int64  // Current position.
 }
 
-func newBlockLineRW(bl [][]byte, off, length int64) *blockLineRW {
+func newBlockLineRW(bl [][]byte, off, length int64) *rawLine {
 	var (
 		n   = 0
 		exp = make([]byte, len(bl)*int(length))
@@ -572,7 +572,7 @@ func newBlockLineRW(bl [][]byte, off, length int64) *blockLineRW {
 	for _, b := range bl {
 		n += copy(exp[n:], b[off:off+length])
 	}
-	return &blockLineRW{
+	return &rawLine{
 		exp:    exp,
 		bl:     bl,
 		offset: off,
@@ -582,7 +582,7 @@ func newBlockLineRW(bl [][]byte, off, length int64) *blockLineRW {
 
 // Len returns the number of bytes of the unread portion of the
 // slice.
-func (rw *blockLineRW) Len() int {
+func (rw *rawLine) Len() int {
 	if rw.i >= int64(len(rw.exp)) {
 		return 0
 	}
@@ -593,9 +593,9 @@ func (rw *blockLineRW) Len() int {
 // Size is the number of bytes available for reading via ReadAt.
 // The returned value is always the same and is not affected by calls
 // to any other method.
-func (rw *blockLineRW) Size() int64 { return int64(len(rw.exp)) }
+func (rw *rawLine) Size() int64 { return int64(len(rw.exp)) }
 
-func (rw *blockLineRW) Read(b []byte) (n int, err error) {
+func (rw *rawLine) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -607,7 +607,7 @@ func (rw *blockLineRW) Read(b []byte) (n int, err error) {
 	return
 }
 
-func (rw *blockLineRW) ReadAt(b []byte, off int64) (n int, err error) {
+func (rw *rawLine) ReadAt(b []byte, off int64) (n int, err error) {
 	// Cannot modify state - see io.ReaderAt.
 	if off < 0 {
 		return 0, errors.New("negative offset")
@@ -622,7 +622,7 @@ func (rw *blockLineRW) ReadAt(b []byte, off int64) (n int, err error) {
 	return
 }
 
-func (rw *blockLineRW) ReadByte() (byte, error) {
+func (rw *rawLine) ReadByte() (byte, error) {
 	if rw.i >= int64(len(rw.exp)) {
 		return 0, io.EOF
 	}
@@ -631,7 +631,7 @@ func (rw *blockLineRW) ReadByte() (byte, error) {
 	return b, nil
 }
 
-func (rw *blockLineRW) UnreadByte() error {
+func (rw *rawLine) UnreadByte() error {
 	if rw.i <= 0 {
 		return errors.New("at beginning of slice")
 	}
@@ -640,7 +640,7 @@ func (rw *blockLineRW) UnreadByte() error {
 }
 
 // Seek implements the io.Seeker interface.
-func (rw *blockLineRW) Seek(offset int64, whence int) (int64, error) {
+func (rw *rawLine) Seek(offset int64, whence int) (int64, error) {
 	var abs int64
 	switch whence {
 	case 0:
@@ -659,7 +659,7 @@ func (rw *blockLineRW) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-func (rw *blockLineRW) WriteByte(c byte) error {
+func (rw *rawLine) WriteByte(c byte) error {
 	if rw.i >= int64(len(rw.exp)) {
 		return io.EOF
 	}
@@ -670,7 +670,7 @@ func (rw *blockLineRW) WriteByte(c byte) error {
 	return nil
 }
 
-func (rw *blockLineRW) Write(b []byte) (n int, err error) {
+func (rw *rawLine) Write(b []byte) (n int, err error) {
 	// Writes are rare. We just reuse WriteByte for simplicity.
 	for _, c := range b {
 		if err = rw.WriteByte(c); err != nil {
@@ -681,7 +681,7 @@ func (rw *blockLineRW) Write(b []byte) (n int, err error) {
 	return
 }
 
-func (rw *blockLineRW) WriteAt(b []byte, offset int64) (n int, err error) {
+func (rw *rawLine) WriteAt(b []byte, offset int64) (n int, err error) {
 	pos := rw.i
 	// Write are rare. We just reuse Seek and Write for simplicity.
 	if _, err = rw.Seek(offset, 0); err != nil {
