@@ -140,7 +140,7 @@ func TestSkipTableLoad(t *testing.T) {
 type testData struct {
 	k      Key
 	v      Value
-	offset uint64
+	offset int64
 }
 
 func generateData(n int, maxKey uint32) []testData {
@@ -148,8 +148,8 @@ func generateData(n int, maxKey uint32) []testData {
 
 	for i := range data {
 		data[i].k = Key(rand.Intn(int(maxKey)))
-		data[i].v = Value(100000 + i*3 + rand.Intn(3))
-		data[i].offset = uint64(rand.Int63n(1000))
+		data[i].v = Value(1000000 + i)
+		data[i].offset = rand.Int63n(1000)
 	}
 
 	return data
@@ -227,7 +227,7 @@ func benchSkipTableStore(b *testing.B, enc lineEncoding) {
 
 	table, err := New(dir, Opts{
 		BlockRows:       4096,
-		BlockLineLength: 128,
+		BlockLineLength: 256,
 		DefaultEncoding: enc,
 	})
 	if err != nil {
@@ -262,7 +262,7 @@ func benchSkipTableOffset(b *testing.B, enc lineEncoding) {
 
 	table, err := New(dir, Opts{
 		BlockRows:       4096,
-		BlockLineLength: 128,
+		BlockLineLength: 256,
 		DefaultEncoding: enc,
 	})
 	if err != nil {
@@ -294,4 +294,49 @@ func BenchmarkSkipTableOffsetVarint(b *testing.B) {
 
 func BenchmarkSkipTableOffsetDelta(b *testing.B) {
 	benchSkipTableOffset(b, lineEncodingDelta)
+}
+
+func benchSkipTableOffsetRange(b *testing.B, enc lineEncoding) {
+	dir, err := ioutil.TempDir("", "skiptable_test")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	table, err := New(dir, Opts{
+		BlockRows:       4096,
+		BlockLineLength: 256,
+		DefaultEncoding: enc,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer table.Close()
+
+	data := generateData(int(b.N), uint32(b.N)/50+1)
+	minVal := data[0].v
+
+	for _, d := range data {
+		if err := table.Store(d.k, d.v, d.offset); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+
+	for _, d := range data {
+		delta := Value(rand.Intn(b.N))
+		offset, err := table.RangeOffsets(d.k, minVal+delta, minVal+delta*Value(rand.Intn(4)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = offset
+	}
+}
+
+func BenchmarkSkipTableOffsetRangeVarint(b *testing.B) {
+	benchSkipTableOffsetRange(b, lineEncodingVarint)
+}
+
+func BenchmarkSkipTableOffsetRangeDelta(b *testing.B) {
+	benchSkipTableOffsetRange(b, lineEncodingDelta)
 }

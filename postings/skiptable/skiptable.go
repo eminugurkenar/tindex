@@ -15,9 +15,9 @@ import (
 	"github.com/edsrzf/mmap-go"
 )
 
-type Key uint32
+type Key int64
 
-type Value uint32
+type Value int64
 
 type Set []Value
 
@@ -197,12 +197,15 @@ func (st *SkipTable) rawLine(k Key, create bool) (*rawLine, error) {
 		blocks = append(blocks, []byte(block))
 	}
 
-	return newBlockLineRW(blocks, int64(bo), int64(st.opts.BlockLineLength)), nil
+	return newRawLine(blocks, int64(bo), int64(st.opts.BlockLineLength)), nil
 }
 
 var ErrNotFound = errors.New("not found")
 
-func (st *SkipTable) RangeOffsets(k Key, min, max Value) ([]uint64, error) {
+func (st *SkipTable) RangeOffsets(k Key, min, max Value) ([]int64, error) {
+	if min > max {
+		return nil, fmt.Errorf("min greater than max")
+	}
 	line, err := st.rawLine(k, false)
 	if err != nil {
 		return nil, err
@@ -215,7 +218,7 @@ func (st *SkipTable) RangeOffsets(k Key, min, max Value) ([]uint64, error) {
 	return r.findRange(min, max)
 }
 
-func (st *SkipTable) Offset(k Key, v Value) (uint64, error) {
+func (st *SkipTable) Offset(k Key, v Value) (int64, error) {
 	line, err := st.rawLine(k, false)
 	if err != nil {
 		return 0, err
@@ -228,7 +231,7 @@ func (st *SkipTable) Offset(k Key, v Value) (uint64, error) {
 	return r.find(v)
 }
 
-func (st *SkipTable) Store(k Key, start Value, offset uint64) error {
+func (st *SkipTable) Store(k Key, start Value, offset int64) error {
 	line, err := st.rawLine(k, true)
 	if err != nil {
 		return err
@@ -295,8 +298,8 @@ func (st *SkipTable) Close() error {
 }
 
 type lineReader interface {
-	find(v Value) (offset uint64, err error)
-	findRange(min, max Value) (offsets []uint64, err error)
+	find(v Value) (offset int64, err error)
+	findRange(min, max Value) (offsets []int64, err error)
 }
 
 type lineEncoding int
@@ -338,18 +341,18 @@ func newLineReaderVarint(line *rawLine) *lineReaderVarint {
 	return &lineReaderVarint{line: line}
 }
 
-func (r *lineReaderVarint) next() (v uint64, o uint64, err error) {
-	if v, err = binary.ReadUvarint(r.line); err != nil {
+func (r *lineReaderVarint) next() (v int64, o int64, err error) {
+	if v, err = binary.ReadVarint(r.line); err != nil {
 		return 0, 0, err
 	}
-	if o, err = binary.ReadUvarint(r.line); err != nil {
+	if o, err = binary.ReadVarint(r.line); err != nil {
 		return 0, 0, err
 	}
 	return v, o, err
 }
 
 // find implements the lineReader interface.
-func (r *lineReaderVarint) find(value Value) (uint64, error) {
+func (r *lineReaderVarint) find(value Value) (int64, error) {
 	val, off, err := r.next()
 	if err != nil {
 		return 0, err
@@ -382,7 +385,7 @@ func (r *lineReaderVarint) find(value Value) (uint64, error) {
 }
 
 // findRange implements the lineReader itnerface.
-func (r *lineReaderVarint) findRange(min, max Value) (offsets []uint64, err error) {
+func (r *lineReaderVarint) findRange(min, max Value) (offsets []int64, err error) {
 	val, off, err := r.next()
 	if err != nil {
 		return nil, err
@@ -456,11 +459,11 @@ func newLineReaderDelta(line *rawLine) *lineReaderDelta {
 	return &lineReaderDelta{line: line}
 }
 
-func (r *lineReaderDelta) base() (v uint64, o uint64, err error) {
-	if v, err = binary.ReadUvarint(r.line); err != nil {
+func (r *lineReaderDelta) base() (v int64, o int64, err error) {
+	if v, err = binary.ReadVarint(r.line); err != nil {
 		return 0, 0, err
 	}
-	if o, err = binary.ReadUvarint(r.line); err != nil {
+	if o, err = binary.ReadVarint(r.line); err != nil {
 		return 0, 0, err
 	}
 	return v, o, err
@@ -477,7 +480,7 @@ func (r *lineReaderDelta) nextDelta() (v int64, o int64, err error) {
 }
 
 // find implements the lineReader interface.
-func (r *lineReaderDelta) find(value Value) (uint64, error) {
+func (r *lineReaderDelta) find(value Value) (int64, error) {
 	val, off, err := r.base()
 	if err != nil {
 		return 0, err
@@ -498,8 +501,8 @@ func (r *lineReaderDelta) find(value Value) (uint64, error) {
 			return 0, err
 		} else {
 			// TODO(fabxc): probably change everything from uint64 to int64.
-			val = uint64(int64(val) + dVal)
-			off = uint64(int64(off) + dOff)
+			val += dVal
+			off += dOff
 		}
 		// We reached the end or stepped beyond the searched value.
 		// The last offset is what we are looking for.
@@ -514,7 +517,7 @@ func (r *lineReaderDelta) find(value Value) (uint64, error) {
 }
 
 // findRange implements the lineReader itnerface.
-func (r *lineReaderDelta) findRange(min, max Value) (offsets []uint64, err error) {
+func (r *lineReaderDelta) findRange(min, max Value) (offsets []int64, err error) {
 	val, off, err := r.base()
 	if err != nil {
 		return nil, err
@@ -538,9 +541,8 @@ func (r *lineReaderDelta) findRange(min, max Value) (offsets []uint64, err error
 			}
 			return nil, err
 		} else {
-			// TODO(fabxc): probably change everything from uint64 to int64.
-			val = uint64(int64(val) + dVal)
-			off = uint64(int64(off) + dOff)
+			val += dVal
+			off += dOff
 		}
 		// Values in the skiplist must be strictly monotonically increasing.
 		// This signals the end.
@@ -572,9 +574,8 @@ func (r *lineReaderDelta) findRange(min, max Value) (offsets []uint64, err error
 			}
 			return nil, err
 		} else {
-			// TODO(fabxc): probably change everything from uint64 to int64.
-			val = uint64(int64(val) + dVal)
-			off = uint64(int64(off) + dOff)
+			val += dVal
+			off += dOff
 		}
 		// We reached the end or stepped beyond max. The previous offset
 		// is the last relevant one.
@@ -595,7 +596,7 @@ var (
 
 // lineAppender adds an offset entry to a skiplist line.
 type lineAppender interface {
-	append(value Value, offset uint64) error
+	append(value Value, offset int64) error
 }
 
 func newLineAppender(line *rawLine, defEncoding lineEncoding) (lineAppender, error) {
@@ -639,24 +640,24 @@ func newLineAppenderVarint(line *rawLine, fresh bool) *lineAppenderVarint {
 }
 
 // append implements the lineAppender interface.
-func (a *lineAppenderVarint) append(value Value, offset uint64) error {
+func (a *lineAppenderVarint) append(value Value, offset int64) error {
 	if a.fresh {
-		if _, err := writeUvarint(a.line, uint64(value)); err != nil {
+		if _, err := writeVarint(a.line, int64(value)); err != nil {
 			return err
 		}
-		if _, err := writeUvarint(a.line, offset); err != nil {
+		if _, err := writeVarint(a.line, offset); err != nil {
 			return err
 		}
 		a.fresh = false
 		return nil
 	}
 
-	lastVal, _, err := readUvarint(a.line)
+	lastVal, _, err := readVarint(a.line)
 	if err != nil {
 		return err
 	}
 	// Consume and discard offset
-	if _, _, err := readUvarint(a.line); err != nil {
+	if _, _, err := readVarint(a.line); err != nil {
 		return err
 	}
 
@@ -664,7 +665,7 @@ func (a *lineAppenderVarint) append(value Value, offset uint64) error {
 		if Value(lastVal) >= value {
 			return errOutOfOrder
 		}
-		val, n, err := readUvarint(a.line)
+		val, n, err := readVarint(a.line)
 		if err != nil {
 			if err == io.EOF {
 				return errLineFull
@@ -682,16 +683,16 @@ func (a *lineAppenderVarint) append(value Value, offset uint64) error {
 			if _, err := a.line.Seek(int64(-n), 1); err != nil {
 				return err
 			}
-			if _, err := writeUvarint(a.line, uint64(value)); err != nil {
+			if _, err := writeVarint(a.line, int64(value)); err != nil {
 				return err
 			}
-			if _, err := writeUvarint(a.line, offset); err != nil {
+			if _, err := writeVarint(a.line, offset); err != nil {
 				return err
 			}
 			return nil
 		}
 		// Consume and discard offset.
-		if _, _, err = readUvarint(a.line); err != nil {
+		if _, _, err = readVarint(a.line); err != nil {
 			return err
 		}
 
@@ -709,24 +710,24 @@ func newLineAppenderDelta(line *rawLine, fresh bool) *lineAppenderDelta {
 }
 
 // append implements the lineAppender interface.
-func (a *lineAppenderDelta) append(value Value, offset uint64) error {
+func (a *lineAppenderDelta) append(value Value, offset int64) error {
 	if a.fresh {
-		if _, err := writeUvarint(a.line, uint64(value)); err != nil {
+		if _, err := writeVarint(a.line, int64(value)); err != nil {
 			return err
 		}
-		if _, err := writeUvarint(a.line, offset); err != nil {
+		if _, err := writeVarint(a.line, offset); err != nil {
 			return err
 		}
 		a.fresh = false
 		return nil
 	}
 
-	lastVal, _, err := readUvarint(a.line)
+	lastVal, _, err := readVarint(a.line)
 	if err != nil {
 		return err
 	}
 	// Consume and discard offset
-	lastOff, _, err := readUvarint(a.line)
+	lastOff, _, err := readVarint(a.line)
 	if err != nil {
 		return err
 	}
@@ -743,7 +744,6 @@ func (a *lineAppenderDelta) append(value Value, offset uint64) error {
 			}
 			return err
 		}
-		val := uint64(int64(lastVal) + dVal)
 
 		if dVal == 0 {
 			// Ensure sufficient space so we don't have to unwrite and
@@ -755,10 +755,10 @@ func (a *lineAppenderDelta) append(value Value, offset uint64) error {
 			if _, err := a.line.Seek(int64(-n), 1); err != nil {
 				return err
 			}
-			if _, err := writeVarint(a.line, int64(uint64(value)-lastVal)); err != nil {
+			if _, err := writeVarint(a.line, int64(value)-lastVal); err != nil {
 				return err
 			}
-			if _, err := writeVarint(a.line, int64(offset-lastOff)); err != nil {
+			if _, err := writeVarint(a.line, offset-lastOff); err != nil {
 				return err
 			}
 			return nil
@@ -769,8 +769,8 @@ func (a *lineAppenderDelta) append(value Value, offset uint64) error {
 			return err
 		}
 
-		lastOff = uint64(int64(lastOff) + dOff)
-		lastVal = val
+		lastOff += dOff
+		lastVal += dVal
 	}
 }
 
@@ -783,7 +783,7 @@ type rawLine struct {
 	i   int64  // Current position.
 }
 
-func newBlockLineRW(bl [][]byte, off, length int64) *rawLine {
+func newRawLine(bl [][]byte, off, length int64) *rawLine {
 	var (
 		n   = 0
 		exp = make([]byte, len(bl)*int(length))
