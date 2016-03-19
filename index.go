@@ -54,17 +54,10 @@ func Open(path string, opts *Options) (*Index, error) {
 	}
 	defer tx.Commit()
 
-	if _, err := tx.CreateBucketIfNotExists(bucketLabelsToID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.CreateBucketIfNotExists(bucketIDToLabels); err != nil {
-		return nil, err
-	}
-	if _, err := tx.CreateBucketIfNotExists(bucketSeriesToID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.CreateBucketIfNotExists(bucketIDToSeries); err != nil {
-		return nil, err
+	for _, bn := range bucketNames {
+		if _, err := tx.CreateBucketIfNotExists(bn); err != nil {
+			return nil, err
+		}
 	}
 
 	ix := &Index{
@@ -79,11 +72,26 @@ var (
 	bucketIDToLabels = []byte("id_to_labels")
 	bucketSeriesToID = []byte("series_to_id")
 	bucketIDToSeries = []byte("id_to_series")
+
+	bucketNames = [][]byte{
+		bucketLabelsToID,
+		bucketIDToLabels,
+		bucketSeriesToID,
+		bucketIDToSeries,
+	}
 )
 
 // seperator is a byte that cannot occur in a valid UTF-8 sequence. It can thus
 // be used to mark boundaries between serialized strings.
 const seperator = byte('\xff')
+
+func (ix *Index) IndexSeries(sid, ts uint64) error {
+	return nil
+}
+
+func (ix *Index) UnindexSeries(sid, ts uint64) error {
+	return nil
+}
 
 func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
 	// Serialize labels into byte keys.
