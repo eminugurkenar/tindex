@@ -54,13 +54,16 @@ func Open(path string, opts *Options) (*Index, error) {
 	}
 	defer tx.Commit()
 
-	if _, err := tx.CreateBucketIfNotExists(bucketLabels); err != nil {
+	if _, err := tx.CreateBucketIfNotExists(bucketLabelsToID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.CreateBucketIfNotExists(bucketPostskip); err != nil {
+	if _, err := tx.CreateBucketIfNotExists(bucketIDToLabels); err != nil {
 		return nil, err
 	}
-	if _, err := tx.CreateBucketIfNotExists(bucketSeries); err != nil {
+	if _, err := tx.CreateBucketIfNotExists(bucketSeriesToID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.CreateBucketIfNotExists(bucketIDToSeries); err != nil {
 		return nil, err
 	}
 
@@ -72,14 +75,15 @@ func Open(path string, opts *Options) (*Index, error) {
 }
 
 var (
-	bucketLabels   = []byte("labels")
-	bucketSeries   = []byte("series")
-	bucketPostskip = []byte("postskip")
+	bucketLabelsToID = []byte("labels_to_id")
+	bucketIDToLabels = []byte("id_to_labels")
+	bucketSeriesToID = []byte("series_to_id")
+	bucketIDToSeries = []byte("id_to_series")
 )
 
 // seperator is a byte that cannot occur in a valid UTF-8 sequence. It can thus
 // be used to mark boundaries between serialized strings.
-const seperator = '\xff'
+const seperator = byte('\xff')
 
 func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
 	// Serialize labels into byte keys.
@@ -99,21 +103,26 @@ func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
 		return nil, err
 	}
 
-	b := tx.Bucket(bucketLabels)
+	bl := tx.Bucket(bucketLabelsToID)
+	bi := tx.Bucket(bucketIDToLabels)
 
 	ids := make([]uint64, len(keys))
 	for i, k := range keys {
-		buf := make([]byte, binary.MaxVarintLen64)
 		var id uint64
-		if v := b.Get(k); v != nil {
+		if v := bl.Get(k); v != nil {
 			id, _ = binary.Uvarint(v)
 		} else {
-			id, err = b.NextSequence()
+			id, err = bl.NextSequence()
 			if err != nil {
 				return nil, err
 			}
+			buf := make([]byte, binary.MaxVarintLen64)
 			n := binary.PutUvarint(buf, id)
-			if err := b.Put(k, buf[:n]); err != nil {
+			if err := bl.Put(k, buf[:n]); err != nil {
+				tx.Rollback()
+				return nil, err
+			}
+			if err := bi.Put(buf[:n], k); err != nil {
 				tx.Rollback()
 				return nil, err
 			}
@@ -124,61 +133,60 @@ func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
 	return ids, tx.Commit()
 }
 
-func (ix *Index) GetSeries(key []byte) (map[string]string, error) {
+func (ix *Index) GetSeries(sid uint64) (map[string]string, error) {
 	tx, err := ix.db.Begin(false)
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback()
 
-	b := tx.Bucket(bucketSeries)
-	v := b.Get(key)
-	if v == nil {
-		return nil, fmt.Errorf("not found")
+	buf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(buf, sid)
+
+	series := tx.Bucket(bucketIDToSeries).Get(buf[:n])
+	if series == nil {
+		return nil, fmt.Errorf("not found %v", buf[:n])
+	}
+	var ids []uint64
+	var id uint64
+	r := bytes.NewReader(series)
+	for r.Len() > 0 {
+		id, _, err = readUvarint(r)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
 	}
 
 	m := map[string]string{}
-	r := bytes.NewReader(v)
 
-	var l uint64
-	for r.Len() > 0 {
-		l, _, err = readUvarint(r)
-		if err != nil {
-			break
-		}
-		buf := make([]byte, int(l))
-		if _, err = r.Read(buf); err != nil {
-			break
-		}
-		ln := string(buf)
+	bl := tx.Bucket(bucketIDToLabels)
 
-		l, _, err = readUvarint(r)
-		if err != nil {
-			break
+	for _, id := range ids {
+		buf := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(buf, id)
+		label := bl.Get(buf[:n])
+		if label == nil {
+			return nil, fmt.Errorf("not found")
 		}
-		buf = make([]byte, int(l))
-		if _, err = r.Read(buf); err != nil {
-			break
-		}
-		lv := string(buf)
-
-		m[ln] = lv
+		p := bytes.Split(label, []byte{seperator})
+		m[string(p[0])] = string(p[1])
 	}
 
-	return m, err
+	return m, nil
 }
 
-func (ix *Index) EnsureSeries(labels map[string]string) (sskey []byte, err error) {
+func (ix *Index) EnsureSeries(labels map[string]string) (sid uint64, err error) {
 	key, err := ix.ensureLabels(labels)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	skey := seriesKey(key)
 	sort.Sort(skey)
-	fmt.Println(skey)
 
 	tx, err := ix.db.Begin(true)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer func() {
 		if err != nil {
@@ -187,28 +195,23 @@ func (ix *Index) EnsureSeries(labels map[string]string) (sskey []byte, err error
 			tx.Commit()
 		}
 	}()
-	b := tx.Bucket(bucketSeries)
+	b := tx.Bucket(bucketSeriesToID)
 
-	if b.Get(skey.bytes()) != nil {
-		return skey.bytes(), nil
+	if sidb := b.Get(skey.bytes()); sidb != nil {
+		sid, _ := binary.Uvarint(sidb)
+		return sid, nil
 	}
 
-	buf := &bytes.Buffer{}
-	for ln, lv := range labels {
-		if _, err = writeUvarint(buf, uint64(len(ln))); err != nil {
-			return nil, err
-		}
-		if _, err = buf.WriteString(ln); err != nil {
-			return nil, err
-		}
-		if _, err = writeUvarint(buf, uint64(len(lv))); err != nil {
-			return nil, err
-		}
-		if _, err = buf.WriteString(lv); err != nil {
-			return nil, err
-		}
+	sid, err = b.NextSequence()
+	if err != nil {
+		return 0, err
 	}
-	return skey.bytes(), b.Put(skey.bytes(), buf.Bytes())
+	buf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(buf, sid)
+
+	b = tx.Bucket(bucketIDToSeries)
+
+	return sid, b.Put(buf[:n], skey.bytes())
 }
 
 type labelSet map[string]string

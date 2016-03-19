@@ -32,18 +32,18 @@ func TestIndexEnsureLabels(t *testing.T) {
 	defer ix.Close()
 
 	lsets := generateTestLabelSets(4)
-	inserted := map[string]labelSet{}
+	inserted := map[uint64]labelSet{}
 
 	for _, lset := range lsets {
-		key, err := ix.EnsureSeries(lset.m())
+		sid, err := ix.EnsureSeries(lset.m())
 		if err != nil {
 			t.Fatal(err)
 		}
-		inserted[string(key)] = lset
+		inserted[sid] = lset
 	}
 
-	for key, exp := range inserted {
-		m, err := ix.GetSeries([]byte(key))
+	for sid, exp := range inserted {
+		m, err := ix.GetSeries(sid)
 		if err != nil {
 			t.Fatal(err)
 		}
