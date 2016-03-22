@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"time"
 
 	"github.com/boltdb/bolt"
 )
@@ -28,7 +29,8 @@ import (
 // }
 
 type Index struct {
-	db *bolt.DB
+	db       *bolt.DB
+	postings postings
 }
 
 type Options struct {
@@ -72,12 +74,14 @@ var (
 	bucketIDToLabels = []byte("id_to_labels")
 	bucketSeriesToID = []byte("series_to_id")
 	bucketIDToSeries = []byte("id_to_series")
+	bucketSkiplists  = []byte("skiplists")
 
 	bucketNames = [][]byte{
 		bucketLabelsToID,
 		bucketIDToLabels,
 		bucketSeriesToID,
 		bucketIDToSeries,
+		bucketSkiplists,
 	}
 )
 
@@ -85,12 +89,59 @@ var (
 // be used to mark boundaries between serialized strings.
 const seperator = byte('\xff')
 
-func (ix *Index) IndexSeries(sid, ts uint64) error {
-	return nil
+func intersect(c1, c2 postingsCursor) []uint64 {
+	var result []uint64
+	v1, e1 := c1.seek(0)
+	v2, e2 := c2.seek(0)
+	for {
+		if e1 != nil || e2 != nil {
+			break
+		}
+		if v1 < v2 {
+			v1, e1 = c1.next()
+		} else if v2 < v1 {
+			v2, e2 = c2.next()
+		} else {
+			result = append(result, uint64(v2))
+			v1, e1 = c1.next()
+			v2, e2 = c2.next()
+		}
+	}
+
+	return result
 }
 
-func (ix *Index) UnindexSeries(sid, ts uint64) error {
-	return nil
+func (ix *Index) Instant(ms []Matcher, ts time.Time) ([]uint64, error) {
+	tx, err := ix.db.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	b := tx.Bucket(bucketLabelsToID)
+	c := b.Cursor()
+
+	var ids []pkey
+	for _, m := range ms {
+		ks := []byte(m.Key())
+		for k, v := c.Seek(ks); bytes.HasPrefix(k, ks); k, v = c.Next() {
+			if m.Match(string(bytes.Split(k, []byte{seperator})[1])) {
+				ids = append(ids, pkey(decodeUint64(v)))
+			}
+		}
+	}
+
+	var cursors []postingsCursor
+	for _, k := range ids {
+		c, err := ix.postings.get(k)
+		if err != nil {
+			return nil, err
+		}
+		cursors = append(cursors, c)
+	}
+
+	_ = cursors
+	return nil, nil
 }
 
 func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
@@ -218,8 +269,21 @@ func (ix *Index) EnsureSeries(labels map[string]string) (sid uint64, err error) 
 	n := binary.PutUvarint(buf, sid)
 
 	b = tx.Bucket(bucketIDToSeries)
+	if err := b.Put(buf[:n], skey.bytes()); err != nil {
+		return 0, err
+	}
 
-	return sid, b.Put(buf[:n], skey.bytes())
+	for _, pk := range skey {
+		pc, err := ix.postings.get(pkey(pk))
+		if err != nil {
+			return 0, err
+		}
+		if err = pc.append(docid(sid)); err != nil {
+			return 0, err
+		}
+	}
+
+	return sid, nil
 }
 
 type labelSet map[string]string
