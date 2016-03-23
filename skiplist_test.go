@@ -28,7 +28,7 @@ func generateData(n int, maxKey uint32) []testData {
 	return data
 }
 
-func TestSkiplistStore(t *testing.T) {
+func newTestBoltSkiplistStore(t *testing.T) *boltSkiplistStore {
 	dir, err := ioutil.TempDir("", "skiplist_test")
 	if err != nil {
 		t.Fatal(err)
@@ -48,11 +48,14 @@ func TestSkiplistStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return &boltSkiplistStore{bkt: bkt}
+}
 
-	sl := &boltSkiplistStore{bkt: bkt}
-
-	data := generateData(10000, 1000)
-
+func TestSkiplistStore(t *testing.T) {
+	var (
+		sl   = newTestBoltSkiplistStore(t)
+		data = generateData(10000, 1000)
+	)
 	for _, d := range data {
 		s, err := sl.get(d.k)
 		if err != nil {
@@ -79,32 +82,10 @@ func TestSkiplistStore(t *testing.T) {
 }
 
 func BenchmarkSkiplistSeek(b *testing.B) {
-
-	dir, err := ioutil.TempDir("", "skiplist_test")
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	db, err := bolt.Open(dir+"test.db", 0666, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	tx, err := db.Begin(true)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer tx.Commit()
-
-	bkt, err := tx.CreateBucket([]byte("test"))
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	sl := &boltSkiplistStore{bkt: bkt}
-
-	fmt.Println("run with N", b.N)
-
-	data := generateData(int(b.N), uint32(b.N)/50+1)
+	var (
+		sl   = newTestBoltSkiplistStore(t)
+		data = generateData(int(b.N), uint32(b.N)/50+1)
+	)
 	for _, d := range data {
 		s, err := sl.get(d.k)
 		if err != nil {
@@ -114,8 +95,6 @@ func BenchmarkSkiplistSeek(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-
-	fmt.Println("insert done")
 
 	b.ResetTimer()
 

@@ -9,21 +9,23 @@ import (
 	"github.com/boltdb/bolt"
 )
 
-var errNotFound = errors.New("not found")
-var errOutOfOrder = errors.New("out of order")
+var (
+	errNotFound   = errors.New("not found")
+	errOutOfOrder = errors.New("out of order")
+)
 
 type pkey uint64
 
 func (k pkey) bytes() []byte { return encodeUint64(uint64(k)) }
 
+type skiplistStore interface {
+	get(pkey) (skiplist, error)
+}
+
 type skiplist interface {
 	next() (docid, pgid, error)
 	seek(docid) (docid, pgid, error)
 	append(docid, pgid) error
-}
-
-type skiplistStore interface {
-	get(pkey) (skiplist, error)
 }
 
 type boltSkiplistStore struct {

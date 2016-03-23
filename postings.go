@@ -11,6 +11,8 @@ import (
 	"github.com/boltdb/bolt"
 )
 
+var bucketSkiplists = []byte("skiplists")
+
 type postings struct {
 	bkt       *bolt.Bucket
 	pages     pageStore
