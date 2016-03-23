@@ -116,37 +116,37 @@ func generateData(opts *generateOpts) []testData {
 // 	}
 // }
 
-// func benchmarkIntersection(b *testing.B, numIntersects int) {
-// 	postings := New()
-// 	err := generateData(postings, &generateOpts{
-// 		numLists:  numIntersects,
-// 		numValMin: 1000000,
-// 		numValMax: 1200000,
-// 	})
-// 	if err != nil {
-// 		b.Fatal(err)
-// 	}
-// 	d
-// 	var sets []Set
-// 	for i := range make([]struct{}, numIntersects) {
-// 		list, err := postings.List(Key(i))
-// 		if err != nil {
-// 			b.Fatal(err)
-// 		}
-// 		set, err := list.Get(0, 100000000)
-// 		if err != nil {
-// 			b.Fatal(err)
-// 		}
+func benchmarkIntersection(b *testing.B, numIntersects int) {
+	postings := New()
+	err := generateData(postings, &generateOpts{
+		numLists:  numIntersects,
+		numValMin: 1000000,
+		numValMax: 1200000,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	d
+	var sets []Set
+	for i := range make([]struct{}, numIntersects) {
+		list, err := postings.List(Key(i))
+		if err != nil {
+			b.Fatal(err)
+		}
+		set, err := list.Get(0, 100000000)
+		if err != nil {
+			b.Fatal(err)
+		}
 
-// 		sets = append(sets, set)
-// 	}
+		sets = append(sets, set)
+	}
 
-// 	b.StartTimer()
+	b.StartTimer()
 
-// 	res := Intersect(sets...)
-// 	b.Logf("Intersection size: %d", len(res))
-// }
+	res := Intersect(sets...)
+	b.Logf("Intersection size: %d", len(res))
+}
 
-// func BenchmarkIntersection5(b *testing.B) {
-// 	benchmarkIntersection(b, 5)
-// }
+func BenchmarkIntersection5(b *testing.B) {
+	benchmarkIntersection(b, 5)
+}

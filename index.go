@@ -98,9 +98,9 @@ func intersect(c1, c2 postingsCursor) []uint64 {
 			break
 		}
 		if v1 < v2 {
-			v1, e1 = c1.next()
+			v1, e1 = c1.seek(v2)
 		} else if v2 < v1 {
-			v2, e2 = c2.next()
+			v2, e2 = c2.seek(v1)
 		} else {
 			result = append(result, uint64(v2))
 			v1, e1 = c1.next()

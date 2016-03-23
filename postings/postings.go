@@ -35,7 +35,7 @@ const indexBlockSize = 4096
 
 type postings struct {
 	skipTable *skiptable.SkipTable
-	nextPage  int
+	nextPage  int64
 	data      mmap.MMap
 	file      *os.File
 }
@@ -86,7 +86,7 @@ func New(dir string) (Postings, error) {
 	}, nil
 }
 
-func (p *postings) allocatePage(k Key, v Value) (uint32, error) {
+func (p *postings) allocatePage(k Key, v Value) (int64, error) {
 	stat, err := p.file.Stat()
 	if err != nil {
 		return 0, err
@@ -110,7 +110,7 @@ func (p *postings) allocatePage(k Key, v Value) (uint32, error) {
 		p.data = data
 	}
 
-	offset := uint32(p.nextPage)
+	offset := p.nextPage
 	if err := p.skipTable.Store(skiptable.Key(k), skiptable.Value(v), offset); err != nil {
 		return 0, fmt.Errorf("skip table store: %s", err)
 	}
@@ -126,7 +126,7 @@ func (p *postings) page(offset uint32) []byte {
 	return []byte(p.data[offset*indexBlockSize : (offset+1)*indexBlockSize])
 }
 
-func (p *postings) Set(k Key, v Value, ptr uint64) error {
+func (p *postings) Set(k Key, v Value, ptr int64) error {
 	off, err := p.skipTable.Offset(skiptable.Key(k), skiptable.Value(v))
 	if err != nil && err != skiptable.ErrNotFound {
 		return fmt.Errorf("skip table: %s", err)

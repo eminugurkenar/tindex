@@ -33,7 +33,7 @@ func TestIndexEnsureLabels(t *testing.T) {
 	}
 	defer ix.Close()
 
-	lsets := generateTestLabelSets(4)
+	lsets := generateTestLabelSets(400)
 	inserted := map[uint64]labelSet{}
 
 	for _, lset := range lsets {
@@ -101,13 +101,16 @@ func BenchmarkIntersect(t *testing.B) {
 	for i := 5000000; i < 5000100; i += 4 {
 		b.vals = append(b.vals, i)
 	}
-	for i := 4990000; i < 5010000; i++ {
+	for i := 5090000; i < 5090100; i += 4 {
+		b.vals = append(b.vals, i)
+	}
+	for i := 4990000; i < 5100000; i++ {
 		c.vals = append(c.vals, i)
 	}
 
 	t.ResetTimer()
 
 	for i := 0; i < t.N; i++ {
-		intersect(a, b)
+		intersect(a, c)
 	}
 }
