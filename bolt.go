@@ -189,3 +189,17 @@ func (s *boltSeriesTx) ensureLabel(key, val string) (uint64, error) {
 
 	return id, nil
 }
+
+func (s *boltSeriesTx) labels(m Matcher) (ids []uint64, err error) {
+	c := s.labelToID.Cursor()
+
+	for lbl, id := c.Seek([]byte(m.Key())); bytes.HasPrefix(lbl, []byte(m.Key())); lbl, id = c.Next() {
+		p := bytes.Split(lbl, []byte{seperator})
+		if !m.Match(string(p[1])) {
+			continue
+		}
+		ids = append(ids, binary.BigEndian.Uint64(id))
+	}
+
+	return ids, nil
+}

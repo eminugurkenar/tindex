@@ -80,39 +80,28 @@ const seperator = byte('\xff')
 // 	return 0
 // }
 
-// func (ix *Index) Instant(ms []Matcher, ts time.Time) ([]uint64, error) {
-// 	var series uint64
-// 	err := ix.db.View(func(tx *bolt.Tx) error {
-// 		b := tx.Bucket(bucketLabelsToID)
-// 		c := b.Cursor()
+// func (ix *index) Instant(ms []Matcher, ts time.Time) ([]uint64, error) {
+// 	tx, err := ix.seriesStore.Begin(false)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	lids, err := tx.labels(ms...)
+// 	if err != nil {
+// 		return nil, err
+// 	}
 
-// 		var ids []pkey
-// 		for _, m := range ms {
-// 			ks := []byte(m.Key())
-// 			for k, v := c.Seek(ks); bytes.HasPrefix(k, ks); k, v = c.Next() {
-// 				if m.Match(string(bytes.Split(k, []byte{seperator})[1])) {
-// 					ids = append(ids, pkey(decodeUint64(v)))
-// 				}
-// 			}
+// 	var cursors []postingsCursor
+// 	for _, k := range lids {
+// 		c, err := ix.postings.get(k)
+// 		if err != nil {
+// 			return nil, err
 // 		}
+// 		cursors = append(cursors, c)
+// 	}
 
-// 		var cursors []postingsCursor
-// 		for _, k := range ids {
-// 			c, err := ix.postings.get(k)
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			cursors = append(cursors, c)
-// 		}
+// 	series = expandCursor(Intersect(cursors...))
 
-// 		series = expandCursor(Intersect(cursors...))
-// 		return nil
-// 	})
 // 	return series, err
-// }
-
-// func (ix *Index) ensureLabels(labels map[string]string) ([]uint64, error) {
-
 // }
 
 // Constructors for registeres seriesStores.
@@ -137,6 +126,8 @@ type seriesTx interface {
 	// ensure stores the series discriptor with a montonically increasing,
 	// unique ID. If the series descriptor was already stored, the ID is returned.
 	ensureSeries(desc map[string]string) (uint64, seriesKey, error)
+	// labels returns label keys of labels for the given matcher.
+	labels(Matcher) ([]uint64, error)
 }
 
 // index implements the Index interface.
