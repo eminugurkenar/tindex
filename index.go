@@ -155,20 +155,30 @@ func (ix *index) Series(id uint64) (map[string]string, error) {
 
 // Series implements the Index interface.
 func (ix *index) EnsureSeries(labels map[string]string) (sid uint64, err error) {
-	tx, err := ix.seriesStore.Begin(true)
+	stx, err := ix.seriesStore.Begin(true)
 	if err != nil {
 		return 0, err
 	}
-	sid, _, err = tx.ensureSeries(labels)
+	sid, skey, err := stx.ensureSeries(labels)
 	if err != nil {
-		tx.Rollback()
+		stx.Rollback()
 		return 0, err
 	}
-	tx.Commit()
+	stx.Commit()
 
-	// TODO(fabxc): add label IDs to postings lists.
+	// TODO(fabxc): skip this step is series is not new.
+	ptx, err := ix.postingsStore.Begin(true)
+	if err != nil {
+		return sid, err
+	}
 
-	return sid, err
+	for _, k := range skey {
+		if err := ptx.append(k, sid); err != nil {
+			ptx.Rollback()
+			return sid, err
+		}
+	}
+	return sid, ptx.Commit()
 }
 
 type labelSet map[string]string
