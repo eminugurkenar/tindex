@@ -4,9 +4,10 @@ import (
 	// "bytes"
 	"encoding/binary"
 	// "errors"
-	// "path/filepath"
+	"path/filepath"
 	"regexp"
 	// "sort"
+	"fmt"
 	// "time"
 )
 
@@ -22,11 +23,13 @@ type Index interface {
 }
 
 type Options struct {
-	SeriesStore string
+	SeriesStore   string
+	PostingsStore string
 }
 
 var DefaultOptions = &Options{
-	SeriesStore: "bolt",
+	SeriesStore:   "bolt",
+	PostingsStore: "bolt",
 }
 
 func Open(path string, opts *Options) (Index, error) {
@@ -34,14 +37,27 @@ func Open(path string, opts *Options) (Index, error) {
 	if opts == nil {
 		opts = DefaultOptions
 	}
+	createSeriesStore, ok := seriesStores[opts.SeriesStore]
+	if !ok {
+		return nil, fmt.Errorf("unknown series store %q", opts.SeriesStore)
+	}
+	createPostingsStore, ok := postingsStores[opts.PostingsStore]
+	if !ok {
+		return nil, fmt.Errorf("unknown postings store %q", opts.PostingsStore)
+	}
 
-	ss, err := seriesStores[opts.SeriesStore](path)
+	ss, err := createSeriesStore(filepath.Join(path, "series", opts.SeriesStore))
+	if err != nil {
+		return nil, err
+	}
+	ps, err := createPostingsStore(filepath.Join(path, "postings", opts.PostingsStore))
 	if err != nil {
 		return nil, err
 	}
 
 	ix := &index{
-		seriesStore: ss,
+		seriesStore:   ss,
+		postingsStore: ps,
 	}
 	return ix, nil
 }
@@ -49,36 +65,6 @@ func Open(path string, opts *Options) (Index, error) {
 // seperator is a byte that cannot occur in a valid UTF-8 sequence. It can thus
 // be used to mark boundaries between serialized strings.
 const seperator = byte('\xff')
-
-// func intersect(c1, c2 postingsCursor) []uint64 {
-// 	var result []uint64
-// 	v1, e1 := c1.seek(0)
-// 	v2, e2 := c2.seek(0)
-// 	for {
-// 		if e1 != nil || e2 != nil {
-// 			break
-// 		}
-// 		if v1 < v2 {
-// 			v1, e1 = c1.seek(v2)
-// 		} else if v2 < v1 {
-// 			v2, e2 = c2.seek(v1)
-// 		} else {
-// 			result = append(result, uint64(v2))
-// 			v1, e1 = c1.next()
-// 			v2, e2 = c2.next()
-// 		}
-// 	}
-
-// 	return result
-// }
-
-// func Intersect(cs ...postingsCursor) postingsCursor {
-// 	return nil
-// }
-
-// func expandCursor(c postingsCursor) uint64 {
-// 	return 0
-// }
 
 // func (ix *index) Instant(ms []Matcher, ts time.Time) ([]uint64, error) {
 // 	tx, err := ix.seriesStore.Begin(false)
@@ -104,8 +90,11 @@ const seperator = byte('\xff')
 // 	return series, err
 // }
 
-// Constructors for registeres seriesStores.
-var seriesStores = map[string]func(path string) (seriesStore, error){}
+// Constructors for registered stores.
+var (
+	seriesStores   = map[string]func(path string) (seriesStore, error){}
+	postingsStores = map[string]func(path string) (postingsStore, error){}
+)
 
 // A seriesStore can start a read or write seriesTx.
 type seriesStore interface {
@@ -130,10 +119,27 @@ type seriesTx interface {
 	labels(Matcher) ([]uint64, error)
 }
 
+// A postingsStore can start a postingsTx on postings lists.
+type postingsStore interface {
+	Begin(writable bool) (postingsTx, error)
+}
+
+// A postingsTx is a transactions on postings lists associated with a key.
+type postingsTx interface {
+	Tx
+	// iter returns a new iterator on the postings list for k.
+	iter(k uint64) (iterator, error)
+	// append adds the ID to the end of the postings list for k. The ID must
+	// be strictly larger than the last value in the list.
+	append(k, id uint64) error
+}
+
 // index implements the Index interface.
 type index struct {
-	opts        *Options
-	seriesStore seriesStore
+	opts *Options
+
+	seriesStore   seriesStore
+	postingsStore postingsStore
 }
 
 // Series implements the Index interface.
