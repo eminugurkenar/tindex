@@ -13,6 +13,68 @@ type iterator interface {
 	seek(id uint64) (uint64, error)
 }
 
+type mergeIterator struct {
+	i1, i2 iterator
+	v1, v2 uint64
+	e1, e2 error
+}
+
+func (it *mergeIterator) next() (uint64, error) {
+	if it.e1 == io.EOF && it.e2 == io.EOF {
+		return 0, io.EOF
+	}
+	if it.e1 != nil {
+		if it.e1 != io.EOF {
+			return 0, it.e1
+		}
+		x := it.v2
+		it.v2, it.e2 = it.i2.next()
+		return x, nil
+	}
+	if it.e2 != nil {
+		if it.e2 != io.EOF {
+			return 0, it.e2
+		}
+		x := it.v1
+		it.v1, it.e1 = it.i1.next()
+		return x, nil
+	}
+	if it.v1 < it.v2 {
+		x := it.v1
+		it.v1, it.e1 = it.i1.next()
+		return x, nil
+	} else if it.v2 < it.v1 {
+		x := it.v2
+		it.v2, it.e2 = it.i2.next()
+		return x, nil
+	} else {
+		x := it.v1
+		it.v1, it.e1 = it.i1.next()
+		it.v2, it.e2 = it.i2.next()
+		return x, nil
+	}
+}
+
+func (it *mergeIterator) seek(id uint64) (uint64, error) {
+	// We just have to advance the first iterator. The next common match is also
+	// the next seeked ID of the intersection.
+	it.v1, it.e1 = it.i1.seek(id)
+	it.v2, it.e2 = it.i2.seek(id)
+	return it.next()
+}
+
+func merge(its ...iterator) iterator {
+	if len(its) == 0 {
+		return nil
+	}
+	i1 := its[0]
+
+	for _, i2 := range its[1:] {
+		i2 = &mergeIterator{i1: i1, i2: i2}
+	}
+	return i1
+}
+
 func expandIterator(it iterator) ([]uint64, error) {
 	var (
 		res = []uint64{}
@@ -40,7 +102,7 @@ func intersect(its ...iterator) iterator {
 	}
 	i1 := its[0]
 
-	for _, i2 := range its {
+	for _, i2 := range its[1:] {
 		i1 = &intersectIterator{i1: i1, i2: i2}
 	}
 	return i1
