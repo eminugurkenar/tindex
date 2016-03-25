@@ -11,7 +11,10 @@ import (
 	// "time"
 )
 
-var errNotFound = errors.New("not found")
+var (
+	errOutOfOrder = errors.New("out of order")
+	errNotFound   = errors.New("not found")
+)
 
 type Index interface {
 	// Instant(m []Matcher, at time.Time) ([]uint64, error)
@@ -22,6 +25,9 @@ type Index interface {
 
 	// See(id uint64, ts uint64) error
 	// Unsee(id uint64, ts uint64) error
+
+	Close() error
+	Sync() error
 }
 
 type Options struct {
@@ -101,6 +107,7 @@ var (
 // A seriesStore can start a read or write seriesTx.
 type seriesStore interface {
 	Begin(writeable bool) (seriesTx, error)
+	Close() error
 }
 
 // Tx is a generic interface for transactions.
@@ -124,6 +131,7 @@ type seriesTx interface {
 // A postingsStore can start a postingsTx on postings lists.
 type postingsStore interface {
 	Begin(writable bool) (postingsTx, error)
+	Close() error
 }
 
 // A postingsTx is a transactions on postings lists associated with a key.
@@ -142,6 +150,17 @@ type index struct {
 
 	seriesStore   seriesStore
 	postingsStore postingsStore
+}
+
+func (ix *index) Close() error {
+	if err := ix.seriesStore.Close(); err != nil {
+		return err
+	}
+	return ix.postingsStore.Close()
+}
+
+func (ix *index) Sync() error {
+	return nil
 }
 
 // Series implements the Index interface.

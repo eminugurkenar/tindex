@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -38,6 +39,9 @@ type boltPostingsStore struct {
 }
 
 func newBoltPostingsStore(path string) (postingsStore, error) {
+	if err := os.MkdirAll(path, 0777); err != nil {
+		return nil, err
+	}
 	db, err := bolt.Open(filepath.Join(path, "postings.db"), 0666, nil)
 	if err != nil {
 		return nil, err
@@ -57,12 +61,16 @@ func newBoltPostingsStore(path string) (postingsStore, error) {
 	return s, err
 }
 
-func (s *boltPostingsStore) Begin(writable bool) (postingsTx, error) {
+func (s *boltPostingsStore) Close() error {
+	return s.db.Close()
+}
+
+func (s *boltPostingsStore) Begin(writeable bool) (postingsTx, error) {
 	tx, err := s.db.Begin(writeable)
 	if err != nil {
 		return nil, err
 	}
-	return &boltSeriesTx{
+	return &boltPostingsTx{
 		Tx:       tx,
 		skiplist: tx.Bucket(bucketSkiplist),
 		postings: tx.Bucket(bucketPostings),
@@ -79,7 +87,7 @@ type boltPostingsTx struct {
 type iteratorStoreFunc func(k uint64) (iterator, error)
 
 func (s iteratorStoreFunc) get(k uint64) (iterator, error) {
-	return f(k)
+	return s(k)
 }
 
 func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
@@ -90,8 +98,9 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 
 	it := &skipIterator{
 		skiplist: &boltSkiplistCursor{
-			k: k,
-			c: b.Cursor(),
+			k:   k,
+			c:   b.Cursor(),
+			bkt: b,
 		},
 		iterators: iteratorStoreFunc(func(k uint64) (iterator, error) {
 			data := p.postings.Get(encodeUint64(k))
@@ -100,13 +109,11 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 			}
 			// TODO(fabxc): for now, offset is zero, pages have no header
 			// and are always delta encoded.
-			return newPageDeltaCursor(data, 0), nil
+			return newPageDelta(data).cursor(), nil
 		}),
 	}
 	return it, nil
 }
-
-const pageSize = 2048
 
 func (p *boltPostingsTx) append(k, id uint64) error {
 	b, err := p.skiplist.CreateBucketIfNotExists(encodeUint64(k))
@@ -129,30 +136,35 @@ func (p *boltPostingsTx) append(k, id uint64) error {
 		}
 	}
 
-	page := p.postings.Get(encodeUint64(pid))
-	if page == nil {
+	var pg page
+	pdata := p.postings.Get(encodeUint64(pid))
+	if pdata == nil {
 		// The page ID was newly allocated but the page doesn't exist yet.
-		page = make([]byte, pageSize)
-	}
-
-	if err := newPageDeltaCursor(page, 0).append(id); err != errPageFull {
-		return err
-	} else {
-		// We couldn't append to the page because it was full.
-		// Allocate a new page.
-		pid, err = p.postings.NextSequence()
-		if err != nil {
+		pg = newPageDelta(make([]byte, pageSize))
+		if err := pg.init(id); err != nil {
 			return err
 		}
-		page = make([]byte, pageSize)
+	} else {
+		pg = newPageDelta(pdata)
 
-		if err = newPageDeltaCursor(page, 0).append(id); err != nil {
+		if err := pg.cursor().append(id); err != errPageFull {
 			return err
+		} else {
+			// We couldn't append to the page because it was full.
+			// Allocate a new page.
+			pid, err = p.postings.NextSequence()
+			if err != nil {
+				return err
+			}
+			pg = newPageDelta(make([]byte, pageSize))
+			if err := pg.init(id); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Update the page in Bolt.
-	return p.postings.Put(encodeUint64(pid), page)
+	return p.postings.Put(encodeUint64(pid), pg.data())
 }
 
 // boltSkiplistCursor implements the skiplistCurosr interface.
@@ -165,8 +177,9 @@ func (p *boltPostingsTx) append(k, id uint64) error {
 type boltSkiplistCursor struct {
 	// k is currently unused. If the bucket holds entries for more than
 	// just a single key, it will be necessary.
-	k uint64
-	c *bolt.Cursor
+	k   uint64
+	c   *bolt.Cursor
+	bkt *bolt.Bucket
 }
 
 func (s *boltSkiplistCursor) next() (uint64, uint64, error) {
@@ -187,7 +200,7 @@ func (s *boltSkiplistCursor) seek(k uint64) (uint64, uint64, error) {
 	}
 	did, pid := decodeUint64(db), decodeUint64(pb)
 
-	if did > d {
+	if did > k {
 		db, pb = s.c.Prev()
 		if db == nil {
 			return 0, 0, errNotFound
@@ -207,8 +220,16 @@ func (s *boltSkiplistCursor) append(d, p uint64) error {
 	return s.bkt.Put(encodeUint64(p), encodeUint64(p))
 }
 
+// boltSeriesStore implements a seriesStore based on Bolt.
+type boltSeriesStore struct {
+	db *bolt.DB
+}
+
 // newBoltSeriesStore initializes a Bolt-based seriesStore under path.
 func newBoltSeriesStore(path string) (seriesStore, error) {
+	if err := os.MkdirAll(path, 0777); err != nil {
+		return nil, err
+	}
 	db, err := bolt.Open(filepath.Join(path, "series.db"), 0666, nil)
 	if err != nil {
 		return nil, err
@@ -234,9 +255,8 @@ func newBoltSeriesStore(path string) (seriesStore, error) {
 	return s, err
 }
 
-// boltSeriesStore implements a seriesStore based on Bolt.
-type boltSeriesStore struct {
-	db *bolt.DB
+func (s *boltSeriesStore) Close() error {
+	return s.db.Close()
 }
 
 // Begin implements the seriesStore interface.
