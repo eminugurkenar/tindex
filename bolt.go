@@ -328,7 +328,7 @@ func (s *boltSeriesTx) ensureSeries(desc map[string]string) (uint64, seriesKey, 
 
 	// Check whether we have seen the series before.
 	var sid uint64
-	if sidb := s.IDToSeries.Get(skey.bytes()); sidb != nil {
+	if sidb := s.seriesToID.Get(skey.bytes()); sidb != nil {
 		sid, _ := binary.Uvarint(sidb)
 		// TODO(fabxc): validate.
 		return sid, skey, nil
@@ -343,6 +343,9 @@ func (s *boltSeriesTx) ensureSeries(desc map[string]string) (uint64, seriesKey, 
 	n := binary.PutUvarint(buf, sid)
 
 	if err := s.IDToSeries.Put(buf[:n], skey.bytes()); err != nil {
+		return 0, nil, err
+	}
+	if err := s.seriesToID.Put(skey.bytes(), buf[:n]); err != nil {
 		return 0, nil, err
 	}
 
@@ -367,7 +370,7 @@ func (s *boltSeriesTx) label(id uint64) (string, string, error) {
 func (s *boltSeriesTx) ensureLabel(key, val string) (uint64, error) {
 	k := make([]byte, len(key)+len(val)+1)
 
-	copy(k[:len(key)], []byte(val))
+	copy(k[:len(key)], []byte(key))
 	k[len(key)] = seperator
 	copy(k[len(key)+1:], []byte(val))
 
@@ -380,6 +383,7 @@ func (s *boltSeriesTx) ensureLabel(key, val string) (uint64, error) {
 		if err != nil {
 			return 0, err
 		}
+
 		buf := make([]byte, binary.MaxVarintLen64)
 		n := binary.PutUvarint(buf, id)
 		if err := s.labelToID.Put(k, buf[:n]); err != nil {
