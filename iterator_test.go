@@ -97,6 +97,37 @@ func TestMergeIntersect(t *testing.T) {
 	}
 }
 
+func BenchmarkIntersect(t *testing.B) {
+	var a, b, c, d []uint64
+
+	for i := 0; i < 10000000; i += 2 {
+		a = append(a, uint64(i))
+	}
+	for i := 5000000; i < 5000100; i += 4 {
+		b = append(b, uint64(i))
+	}
+	for i := 5090000; i < 5090600; i += 4 {
+		b = append(b, uint64(i))
+	}
+	for i := 4990000; i < 5100000; i++ {
+		c = append(c, uint64(i))
+	}
+	for i := 4000000; i < 6000000; i++ {
+		d = append(d, uint64(i))
+	}
+
+	i1 := newPlainListIterator(a)
+	i2 := newPlainListIterator(b)
+	i3 := newPlainListIterator(c)
+	i4 := newPlainListIterator(d)
+
+	t.ResetTimer()
+
+	for i := 0; i < t.N; i++ {
+		intersect(i1, i2, i3, i4)
+	}
+}
+
 func TestMergeIterator(t *testing.T) {
 	var cases = []struct {
 		a, b []uint64
