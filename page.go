@@ -3,72 +3,96 @@ package tindex
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 )
 
+const pageSize = 2048
+
 var errPageFull = errors.New("page full")
+
+type pageCursor interface {
+	iterator
+	append(v uint64) error
+}
+
+type page interface {
+	cursor() pageCursor
+	init(v uint64) error
+	data() []byte
+}
+
+type pageDelta struct {
+	b []byte
+}
+
+func newPageDelta(data []byte) *pageDelta {
+	return &pageDelta{b: data}
+}
+
+func (p *pageDelta) init(v uint64) error {
+	// Write first value.
+	binary.PutUvarint(p.b, v)
+	return nil
+}
+
+func (p *pageDelta) cursor() pageCursor {
+	return &pageDeltaCursor{data: p.b}
+}
+
+func (p *pageDelta) data() []byte {
+	return p.b
+}
 
 type pageDeltaCursor struct {
 	data []byte
-
-	pos, off int
-	cur      docid
-	fresh    bool
+	pos  int
+	cur  uint64
 }
 
-func newPageDeltaCursor(data []byte, offset int) *pageDeltaCursor {
-	return &pageDeltaCursor{
-		data:  data,
-		off:   offset,
-		pos:   offset,
-		fresh: true,
-	}
-}
-
-var errPageFull = errors.New("page full")
-
-func (p *pageDeltaCursor) append(id docid) error {
-	_, err := p.seek(0)
+func (p *pageDeltaCursor) append(id uint64) error {
+	// Run to the end.
+	_, err := p.next()
 	for ; err == nil; _, err = p.next() {
 		// Consume.
 	}
 	if err != io.EOF {
 		return err
 	}
-	if p.size()-p.pos < binary.MaxVarintLen64 {
+	if len(p.data)-p.pos < binary.MaxVarintLen64 {
 		return errPageFull
 	}
-	n := binary.PutUvarint(p.data[p.pos:], uint64(id))
-	p.pos += n
+	if p.cur >= id {
+		return errOutOfOrder
+	}
+	p.pos += binary.PutUvarint(p.data[p.pos:], id-p.cur)
+	p.cur = id
 
 	return nil
 }
 
-func (p *pageDeltaCursor) seek(min docid) (docid, error) {
-	p.pos = p.off
-	v, err := p.next()
-	for ; err == nil && v < min; v, err = p.next() {
+func (p *pageDeltaCursor) seek(min uint64) (v uint64, err error) {
+	if min < p.cur {
+		p.pos = 0
+	} else if min == p.cur {
+		return p.cur, nil
+	}
+	for v, err = p.next(); err == nil && v < min; v, err = p.next() {
 		// Consume.
 	}
 	return p.cur, err
 }
 
-func (p *pageDeltaCursor) next() (docid, error) {
+func (p *pageDeltaCursor) next() (uint64, error) {
 	var n int
-	if p.fresh {
-		id, n := binary.Uvarint(p.data[p.pos:])
-		if n <= 0 {
-			return 0, io.EOF
-		}
-		p.cur = docid(id)
-		p.fresh = false
-
+	if p.pos == 0 {
+		p.cur, n = binary.Uvarint(p.data)
 	} else {
-		var dv int64
-		dv, n = binary.Varint(p.data[p.pos:])
+		var dv uint64
+		dv, n = binary.Uvarint(p.data[p.pos:])
 		if n <= 0 || dv == 0 {
 			return 0, io.EOF
 		}
-		p.cur = docid(int64(p.cur) + dv)
+		p.cur += dv
 	}
 	p.pos += n
 
