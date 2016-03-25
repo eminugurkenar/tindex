@@ -1,13 +1,24 @@
-package tsindex
+package tindex
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
 
 	"github.com/boltdb/bolt"
+)
+
+var (
+	bucketLabelToID  = []byte("label_to_id")
+	bucketIDToLabel  = []byte("id_to_label")
+	bucketSeriesToID = []byte("series_to_id")
+	bucketIDToSeries = []byte("id_to_series")
+
+	bucketPostings = []byte("postings")
+	bucketSkiplist = []byte("skiplist")
 )
 
 func init() {
@@ -15,14 +26,186 @@ func init() {
 		panic("bolt series store initialized twice")
 	}
 	seriesStores["bolt"] = newBoltSeriesStore
+
+	if _, ok := postingsStores["bolt"]; ok {
+		panic("bolt postings store initialized twice")
+	}
+	postingsStores["bolt"] = newBoltPostingsStore
 }
 
-var (
-	bucketLabelToID  = []byte("label_to_id")
-	bucketIDToLabel  = []byte("id_to_label")
-	bucketSeriesToID = []byte("series_to_id")
-	bucketIDToSeries = []byte("id_to_series")
-)
+type boltPostingsStore struct {
+	db *bolt.DB
+}
+
+func newBoltPostingsStore(path string) (postingsStore, error) {
+	db, err := bolt.Open(filepath.Join(path, "postings.db"), 0666, nil)
+	if err != nil {
+		return nil, err
+	}
+	s := &boltPostingsStore{
+		db: db,
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		if _, err = tx.CreateBucketIfNotExists(bucketPostings); err != nil {
+			return err
+		}
+		if _, err = tx.CreateBucketIfNotExists(bucketSkiplist); err != nil {
+			return err
+		}
+		return nil
+	})
+	return s, err
+}
+
+func (s *boltPostingsStore) Begin(writable bool) (postingsTx, error) {
+	tx, err := s.db.Begin(writeable)
+	if err != nil {
+		return nil, err
+	}
+	return &boltSeriesTx{
+		Tx:       tx,
+		skiplist: tx.Bucket(bucketSkiplist),
+		postings: tx.Bucket(bucketPostings),
+	}, nil
+}
+
+type boltPostingsTx struct {
+	*bolt.Tx
+
+	skiplist *bolt.Bucket
+	postings *bolt.Bucket
+}
+
+type iteratorStoreFunc func(k uint64) (iterator, error)
+
+func (s iteratorStoreFunc) get(k uint64) (iterator, error) {
+	return f(k)
+}
+
+func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
+	b := p.skiplist.Bucket(encodeUint64(k))
+	if b == nil {
+		return nil, errNotFound
+	}
+
+	it := &skipIterator{
+		skiplist: &boltSkiplistCursor{
+			k: k,
+			c: b.Cursor(),
+		},
+		iterators: iteratorStoreFunc(func(k uint64) (iterator, error) {
+			data := p.postings.Get(encodeUint64(k))
+			if data == nil {
+				return nil, errNotFound
+			}
+			// TODO(fabxc): for now, offset is zero, pages have no header
+			// and are always delta encoded.
+			return newPageDeltaCursor(data, 0), nil
+		}),
+	}
+	return it, nil
+}
+
+const pageSize = 2048
+
+func (p *boltPostingsTx) append(k, id uint64) error {
+	b, err := p.skiplist.CreateBucketIfNotExists(encodeUint64(k))
+	if err != nil {
+		return err
+	}
+	sl := &boltSkiplistCursor{
+		k: k,
+		c: b.Cursor(),
+	}
+	_, pid, err := sl.seek(math.MaxUint64)
+	if err != nil {
+		if err == errNotFound {
+			pid, err = p.postings.NextSequence()
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	page := p.postings.Get(encodeUint64(pid))
+	if page == nil {
+		// The page ID was newly allocated but the page doesn't exist yet.
+		page = make([]byte, pageSize)
+	}
+
+	if err := newPageDeltaCursor(page, 0).append(id); err != errPageFull {
+		return err
+	} else {
+		// We couldn't append to the page because it was full.
+		// Allocate a new page.
+		pid, err = p.postings.NextSequence()
+		if err != nil {
+			return err
+		}
+		page = make([]byte, pageSize)
+
+		if err = newPageDeltaCursor(page, 0).append(id); err != nil {
+			return err
+		}
+	}
+
+	// Update the page in Bolt.
+	return p.postings.Put(encodeUint64(pid), page)
+}
+
+// boltSkiplistCursor implements the skiplistCurosr interface.
+//
+// TODO(fabxc): benchmark the overhead of a bucket per key.
+// It might be more performant to have all skiplists in the same bucket.
+//
+// 	20k keys, ~10 skiplist entries avg -> 200k keys, 1 bucket vs 20k buckets, 10 keys
+//
+type boltSkiplistCursor struct {
+	// k is currently unused. If the bucket holds entries for more than
+	// just a single key, it will be necessary.
+	k uint64
+	c *bolt.Cursor
+}
+
+func (s *boltSkiplistCursor) next() (uint64, uint64, error) {
+	db, pb := s.c.Next()
+	if db == nil {
+		return 0, 0, errNotFound
+	}
+	return decodeUint64(db), decodeUint64(pb), nil
+}
+
+func (s *boltSkiplistCursor) seek(k uint64) (uint64, uint64, error) {
+	db, pb := s.c.Seek(encodeUint64(k))
+	if db == nil {
+		db, pb = s.c.Last()
+		if db == nil {
+			return 0, 0, errNotFound
+		}
+	}
+	did, pid := decodeUint64(db), decodeUint64(pb)
+
+	if did > d {
+		db, pb = s.c.Prev()
+		if db == nil {
+			return 0, 0, errNotFound
+		}
+		did, pid = decodeUint64(db), decodeUint64(pb)
+	}
+	return did, pid, nil
+}
+
+func (s *boltSkiplistCursor) append(d, p uint64) error {
+	k, _ := s.c.Last()
+
+	if k != nil && decodeUint64(k) >= uint64(d) {
+		return errOutOfOrder
+	}
+
+	return s.bkt.Put(encodeUint64(p), encodeUint64(p))
+}
 
 // newBoltSeriesStore initializes a Bolt-based seriesStore under path.
 func newBoltSeriesStore(path string) (seriesStore, error) {

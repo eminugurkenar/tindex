@@ -1,4 +1,4 @@
-package tsindex
+package tindex
 
 import (
 	"encoding/binary"

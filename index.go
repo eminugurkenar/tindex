@@ -1,15 +1,17 @@
-package tsindex
+package tindex
 
 import (
 	// "bytes"
 	"encoding/binary"
-	// "errors"
+	"errors"
 	"path/filepath"
 	"regexp"
 	// "sort"
 	"fmt"
 	// "time"
 )
+
+var errNotFound = errors.New("not found")
 
 type Index interface {
 	// Instant(m []Matcher, at time.Time) ([]uint64, error)

@@ -144,6 +144,13 @@ type skiplistIterator interface {
 	next() (val, ptr uint64, err error)
 }
 
+type skiplistCursor interface {
+	skiplistIterator
+	// Append the document ID d with pointer p to the skiplist.
+	// Returns an error if d is not strictly greater than the last ID.
+	append(d, p uint64) error
+}
+
 // iteratorStore allows to retrieve an iterator based on a key.
 type iteratorStore interface {
 	get(uint64) (iterator, error)
