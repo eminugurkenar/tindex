@@ -1,4 +1,4 @@
-package tsindex
+package tindex
 
 import (
 	"io"
@@ -70,7 +70,7 @@ func merge(its ...iterator) iterator {
 	i1 := its[0]
 
 	for _, i2 := range its[1:] {
-		i2 = &mergeIterator{i1: i1, i2: i2}
+		i1 = &mergeIterator{i1: i1, i2: i2}
 	}
 	return i1
 }
