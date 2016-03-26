@@ -314,13 +314,13 @@ func (s *boltSeriesTx) series(sid uint64) (map[string]string, error) {
 }
 
 // ensureSeries implements the seriesTx interface.
-func (s *boltSeriesTx) ensureSeries(desc map[string]string) (uint64, seriesKey, error) {
+func (s *boltSeriesTx) ensureSeries(desc map[string]string) (uint64, seriesKey, bool, error) {
 	// Ensure that all labels are persisted.
 	var skey seriesKey
 	for k, v := range desc {
 		key, err := s.ensureLabel(k, v)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, false, err
 		}
 		skey = append(skey, key)
 	}
@@ -331,25 +331,25 @@ func (s *boltSeriesTx) ensureSeries(desc map[string]string) (uint64, seriesKey, 
 	if sidb := s.seriesToID.Get(skey.bytes()); sidb != nil {
 		sid, _ := binary.Uvarint(sidb)
 		// TODO(fabxc): validate.
-		return sid, skey, nil
+		return sid, skey, false, nil
 	}
 
 	// We haven't seen this series before, create a new ID.
 	sid, err := s.IDToSeries.NextSequence()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, false, err
 	}
 	buf := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(buf, sid)
 
 	if err := s.IDToSeries.Put(buf[:n], skey.bytes()); err != nil {
-		return 0, nil, err
+		return 0, nil, false, err
 	}
 	if err := s.seriesToID.Put(skey.bytes(), buf[:n]); err != nil {
-		return 0, nil, err
+		return 0, nil, false, err
 	}
 
-	return sid, skey, nil
+	return sid, skey, true, nil
 }
 
 // label retrieves the key/value label associated with id.

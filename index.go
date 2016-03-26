@@ -123,7 +123,7 @@ type seriesTx interface {
 	series(id uint64) (map[string]string, error)
 	// ensure stores the series discriptor with a montonically increasing,
 	// unique ID. If the series descriptor was already stored, the ID is returned.
-	ensureSeries(desc map[string]string) (uint64, seriesKey, error)
+	ensureSeries(desc map[string]string) (uint64, seriesKey, bool, error)
 	// labels returns label keys of labels for the given matcher.
 	labels(Matcher) ([]uint64, error)
 }
@@ -180,14 +180,18 @@ func (ix *index) EnsureSeries(labels map[string]string) (sid uint64, err error) 
 	if err != nil {
 		return 0, err
 	}
-	sid, skey, err := stx.ensureSeries(labels)
+	sid, skey, created, err := stx.ensureSeries(labels)
 	if err != nil {
 		stx.Rollback()
 		return 0, err
 	}
-	stx.Commit()
+	if err := stx.Commit(); err != nil {
+		return 0, err
+	}
+	if !created {
+		return sid, nil
+	}
 
-	// TODO(fabxc): skip this step is series is not new.
 	ptx, err := ix.postingsStore.Begin(true)
 	if err != nil {
 		return sid, err
