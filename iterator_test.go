@@ -52,6 +52,10 @@ func TestIntersectIterator(t *testing.T) {
 			a:   []uint64{1, 2, 3, 4, 9, 10},
 			b:   []uint64{1, 4, 5, 6, 7, 8, 10, 11},
 			res: []uint64{1, 4, 10},
+		}, {
+			a:   []uint64{1},
+			b:   []uint64{0, 1},
+			res: []uint64{1},
 		},
 	}
 

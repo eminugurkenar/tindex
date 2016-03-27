@@ -3,6 +3,7 @@ package tindex
 import (
 	"fmt"
 	"io/ioutil"
+	"time"
 	// "math/rand"
 	"reflect"
 	"testing"
@@ -60,5 +61,56 @@ func TestIndexEnsureLabels(t *testing.T) {
 			t.Errorf("Expected: %s", exp)
 			t.Fatalf("Received: %s", m)
 		}
+	}
+}
+
+func TestIndexInstant(t *testing.T) {
+	dir, err := ioutil.TempDir("", "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+
+	sid, err := ix.EnsureSeries(map[string]string{
+		"a": "b",
+		"c": "d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.See(time.Now(), sid); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ix.Instant(time.Now(), NewEqualMatcher("a", "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(res, []uint64{sid}) {
+		t.Fatal("no match", res, []uint64{sid})
+	}
+	res, err = ix.Instant(time.Now(), NewEqualMatcher("c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(res, []uint64{sid}) {
+		t.Fatal("no match", res)
+	}
+
+	if err := ix.Unsee(time.Now(), sid); err != nil {
+		t.Fatal(err)
+	}
+	res, err = ix.Instant(time.Now(), NewEqualMatcher("c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(res, []uint64{}) {
+		t.Fatal("no match", res)
 	}
 }

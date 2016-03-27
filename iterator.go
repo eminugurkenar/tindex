@@ -130,9 +130,10 @@ func (it *intersectIterator) next() (uint64, error) {
 }
 
 func (it *intersectIterator) seek(id uint64) (uint64, error) {
-	// We just have to advance the first iterator. The next common match is also
-	// the next seeked ID of the intersection.
+	// We have to advance both iterators. Otherwise, we get a false-positive
+	// match on 0 if only on of the iterators has it.
 	it.v1, it.e1 = it.i1.seek(id)
+	it.v2, it.e2 = it.i2.seek(id)
 	return it.next()
 }
 

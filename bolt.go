@@ -34,6 +34,11 @@ func init() {
 		panic("bolt postings store initialized twice")
 	}
 	postingsStores["bolt"] = newBoltPostingsStore
+
+	if _, ok := timelineStores["bolt"]; ok {
+		panic("bolt timeline store initialized twice")
+	}
+	timelineStores["bolt"] = newBoltTimelineStore
 }
 
 type boltPostingsStore struct {
@@ -123,12 +128,13 @@ func (p *boltPostingsTx) append(k, id uint64) error {
 		return err
 	}
 	sl := &boltSkiplistCursor{
-		k: k,
-		c: b.Cursor(),
+		k:   k,
+		c:   b.Cursor(),
+		bkt: b,
 	}
 	_, pid, err := sl.seek(math.MaxUint64)
 	if err != nil {
-		if err == errNotFound {
+		if err == io.EOF {
 			pid, err = p.postings.NextSequence()
 			if err != nil {
 				return err
@@ -146,8 +152,15 @@ func (p *boltPostingsTx) append(k, id uint64) error {
 		if err := pg.init(id); err != nil {
 			return err
 		}
+		if err := sl.append(id, pid); err != nil {
+			return err
+		}
 	} else {
-		pg = newPageDelta(pdata)
+		// The byte slice is mmaped from bolt. We have to copy it.
+		// TODO(fabxc): page-aligned storage wanted that allows writing directly.
+		pdatac := make([]byte, len(pdata))
+		copy(pdatac, pdata)
+		pg = newPageDelta(pdatac)
 
 		if err := pg.cursor().append(id); err != errPageFull {
 			return err
@@ -160,6 +173,9 @@ func (p *boltPostingsTx) append(k, id uint64) error {
 			}
 			pg = newPageDelta(make([]byte, pageSize))
 			if err := pg.init(id); err != nil {
+				return err
+			}
+			if err := sl.append(id, pid); err != nil {
 				return err
 			}
 		}
@@ -187,7 +203,7 @@ type boltSkiplistCursor struct {
 func (s *boltSkiplistCursor) next() (uint64, uint64, error) {
 	db, pb := s.c.Next()
 	if db == nil {
-		return 0, 0, errNotFound
+		return 0, 0, io.EOF
 	}
 	return decodeUint64(db), decodeUint64(pb), nil
 }
@@ -197,17 +213,18 @@ func (s *boltSkiplistCursor) seek(k uint64) (uint64, uint64, error) {
 	if db == nil {
 		db, pb = s.c.Last()
 		if db == nil {
-			return 0, 0, errNotFound
+			return 0, 0, io.EOF
 		}
 	}
 	did, pid := decodeUint64(db), decodeUint64(pb)
 
 	if did > k {
-		db, pb = s.c.Prev()
-		if db == nil {
-			return 0, 0, errNotFound
+		// If the found entry is behind the seeked ID, try the previous
+		// entry if it exists. The page it points to contains the range of k.
+		dbp, pbp := s.c.Prev()
+		if dbp != nil {
+			did, pid = decodeUint64(dbp), decodeUint64(pbp)
 		}
-		did, pid = decodeUint64(db), decodeUint64(pb)
 	}
 	return did, pid, nil
 }
@@ -219,7 +236,7 @@ func (s *boltSkiplistCursor) append(d, p uint64) error {
 		return errOutOfOrder
 	}
 
-	return s.bkt.Put(encodeUint64(p), encodeUint64(p))
+	return s.bkt.Put(encodeUint64(d), encodeUint64(p))
 }
 
 // boltSeriesStore implements a seriesStore based on Bolt.
@@ -407,7 +424,8 @@ func (s *boltSeriesTx) labels(m Matcher) (ids []uint64, err error) {
 		if !m.Match(string(p[1])) {
 			continue
 		}
-		ids = append(ids, binary.BigEndian.Uint64(id))
+		x, _ := binary.Uvarint(id)
+		ids = append(ids, x)
 	}
 
 	return ids, nil
