@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/boltdb/bolt"
 )
@@ -409,4 +411,152 @@ func (s *boltSeriesTx) labels(m Matcher) (ids []uint64, err error) {
 	}
 
 	return ids, nil
+}
+
+type boltTimelineStore struct {
+	db *bolt.DB
+}
+
+var (
+	bucketSnapshot = []byte("snapshot")
+	bucketDiff     = []byte("diff")
+)
+
+func newBoltTimelineStore(path string) (timelineStore, error) {
+	if err := os.MkdirAll(path, 0777); err != nil {
+		return nil, err
+	}
+	db, err := bolt.Open(filepath.Join(path, "series.db"), 0666, nil)
+	if err != nil {
+		return nil, err
+	}
+	s := &boltTimelineStore{
+		db: db,
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		if _, err = tx.CreateBucketIfNotExists(bucketSnapshot); err != nil {
+			return err
+		}
+		if _, err = tx.CreateBucketIfNotExists(bucketDiff); err != nil {
+			return err
+		}
+		return nil
+	})
+	return s, err
+}
+
+func (s *boltTimelineStore) Close() error {
+	return s.db.Close()
+}
+
+func (s *boltTimelineStore) Begin(writeable bool) (timelineTx, error) {
+	tx, err := s.db.Begin(writeable)
+	if err != nil {
+		return nil, err
+	}
+	return &boltTimelineTx{
+		Tx:        tx,
+		snapshots: tx.Bucket(bucketSnapshot),
+		diffs:     tx.Bucket(bucketDiff),
+	}, nil
+}
+
+type boltTimelineTx struct {
+	*bolt.Tx
+
+	snapshots *bolt.Bucket
+	diffs     *bolt.Bucket
+}
+
+func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
+	ts := t.UnixNano() / int64(time.Millisecond)
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(ts))
+
+	return &boltTimelineIterator{
+		ts: buf,
+		c:  tl.diffs.Cursor(),
+	}, nil
+}
+
+func (tl *boltTimelineTx) Range(start, end time.Time) (iterator, error) {
+	return nil, nil
+}
+
+func (tl *boltTimelineTx) See(t time.Time, ids ...uint64) error {
+	ts := t.UnixNano() / int64(time.Millisecond)
+
+	for _, id := range ids {
+		buf := make([]byte, 16)
+		binary.BigEndian.PutUint64(buf, id)
+		binary.BigEndian.PutUint64(buf[8:], uint64(ts))
+
+		if err := tl.diffs.Put(buf, []byte{1}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (tl *boltTimelineTx) Unsee(t time.Time, ids ...uint64) error {
+	ts := t.UnixNano() / int64(time.Millisecond)
+
+	for _, id := range ids {
+		buf := make([]byte, 16)
+		binary.BigEndian.PutUint64(buf, id)
+		binary.BigEndian.PutUint64(buf[8:], uint64(ts))
+
+		if err := tl.diffs.Put(buf, []byte{0}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type boltTimelineIterator struct {
+	c  *bolt.Cursor
+	ts []byte
+
+	k, v []byte
+}
+
+func (tl *boltTimelineIterator) next() (uint64, error) {
+	var exist bool
+	k, v := tl.k, tl.v
+Outer:
+	for !exist {
+		for {
+			if k == nil {
+				break Outer
+			}
+			if exist && !bytes.Equal(k[:8], tl.k[:8]) {
+				break
+			}
+			if bytes.Compare(k[8:], tl.ts) > 0 {
+				buf := make([]byte, 16)
+				binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(k[:8])+1)
+				k, v = tl.c.Seek(buf)
+				break
+			}
+			exist = v[0] == 1
+			tl.k, tl.v = k, v
+			k, v = tl.c.Next()
+		}
+	}
+	if tl.k == nil || !exist {
+		return 0, io.EOF
+	}
+	x := binary.BigEndian.Uint64(tl.k)
+	tl.k, tl.v = k, v
+
+	return x, nil
+}
+
+func (tl *boltTimelineIterator) seek(x uint64) (uint64, error) {
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf, x)
+	tl.k, tl.v = tl.c.Seek(buf)
+	return tl.next()
 }

@@ -8,7 +8,7 @@ import (
 	"regexp"
 	// "sort"
 	"fmt"
-	// "time"
+	"time"
 )
 
 var (
@@ -33,11 +33,13 @@ type Index interface {
 type Options struct {
 	SeriesStore   string
 	PostingsStore string
+	TimelineStore string
 }
 
 var DefaultOptions = &Options{
 	SeriesStore:   "bolt",
 	PostingsStore: "bolt",
+	TimelineStore: "bolt",
 }
 
 func Open(path string, opts *Options) (Index, error) {
@@ -144,6 +146,22 @@ type postingsTx interface {
 	append(k, id uint64) error
 }
 
+type timelineStore interface {
+	Begin(writable bool) (timelineTx, error)
+	Close() error
+}
+
+type timelineTx interface {
+	// Returns an iterator of document IDs that were valid at the given time.
+	Instant(t time.Time) (iterator, error)
+	// Returns an iterator of document IDs that were valid at some point
+	// during the given range.
+	Range(start, end time.Time) (iterator, error)
+
+	See(t time.Time, ids ...uint64) error
+	Unsee(t time.Time, ids ...uint64) error
+}
+
 // index implements the Index interface.
 type index struct {
 	opts *Options
@@ -204,6 +222,11 @@ func (ix *index) EnsureSeries(labels map[string]string) (sid uint64, err error) 
 		}
 	}
 	return sid, ptx.Commit()
+}
+
+func (ix *index) See(id uint64, ts uint64) error {
+
+	return nil
 }
 
 type labelSet map[string]string
