@@ -524,6 +524,60 @@ func (tl *boltTimelineTx) SetDiff(t time.Time, state diffState, ids ...uint64) e
 	return nil
 }
 
+type boltTimelineDiffIterator struct {
+	c   *bolt.Cursor
+	max []byte
+
+	k, v []byte
+}
+
+func (tl *boltTimelineDiffIterator) next() (uint64, bool, error) {
+	var (
+		last  []byte
+		exist bool
+	)
+	for {
+		if tl.k == nil {
+			if last != nil {
+				break
+			}
+			return 0, false, io.EOF
+		}
+		// Check whether we reached a new ID.
+		if last != nil && !bytes.Equal(last[:8], tl.k[:8]) {
+			break
+		}
+
+		// Check whether the following diffs for the current ID are behind the max
+		// timestamp. If so, skip to the next ID and the last exist state is the
+		// state of ID at max.
+		if bytes.Compare(tl.k[8:], tl.max) > 0 {
+			buf := make([]byte, 16)
+			binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(tl.k[:8])+1)
+			tl.k, tl.v = tl.c.Seek(buf)
+			// If we were already reading a value, return it first.
+			if last != nil {
+				break
+			}
+		} else {
+			// A new diff within our time window. Evaluate most recent state
+			// and advance.
+			exist = tl.v[0] == byte(diffStateAdd)
+			last = tl.k
+			tl.k, tl.v = tl.c.Next()
+		}
+	}
+	return decodeUint64(last[:8]), exist, nil
+}
+
+func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
+	fmt.Println("seek", v)
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf, v)
+	tl.k, tl.v = tl.c.Seek(buf)
+	return tl.next()
+}
+
 type boltTimelineIterator struct {
 	c  *bolt.Cursor
 	ts []byte
