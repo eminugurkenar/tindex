@@ -145,8 +145,7 @@ type timelineTx interface {
 	// during the given range.
 	Range(start, end time.Time) (iterator, error)
 
-	See(t time.Time, ids ...uint64) error
-	Unsee(t time.Time, ids ...uint64) error
+	SetDiff(t time.Time, s diffState, ids ...uint64) error
 }
 
 // index implements the Index interface.
@@ -218,7 +217,7 @@ func (ix *index) See(ts time.Time, id uint64) error {
 	if err != nil {
 		return err
 	}
-	if err := tx.See(ts, id); err != nil {
+	if err := tx.SetDiff(ts, diffStateAdd, id); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -230,7 +229,7 @@ func (ix *index) Unsee(ts time.Time, id uint64) error {
 	if err != nil {
 		return err
 	}
-	if err := tx.Unsee(ts, id); err != nil {
+	if err := tx.SetDiff(ts, diffStateDel, id); err != nil {
 		tx.Rollback()
 		return err
 	}

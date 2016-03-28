@@ -501,7 +501,14 @@ func (tl *boltTimelineTx) Range(start, end time.Time) (iterator, error) {
 	return nil, nil
 }
 
-func (tl *boltTimelineTx) See(t time.Time, ids ...uint64) error {
+type diffState byte
+
+const (
+	diffStateAdd = 1
+	diffStateDel = 2
+)
+
+func (tl *boltTimelineTx) SetDiff(t time.Time, state diffState, ids ...uint64) error {
 	ts := t.UnixNano() / int64(time.Millisecond)
 
 	for _, id := range ids {
@@ -509,23 +516,7 @@ func (tl *boltTimelineTx) See(t time.Time, ids ...uint64) error {
 		binary.BigEndian.PutUint64(buf, id)
 		binary.BigEndian.PutUint64(buf[8:], uint64(ts))
 
-		if err := tl.diffs.Put(buf, []byte{1}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (tl *boltTimelineTx) Unsee(t time.Time, ids ...uint64) error {
-	ts := t.UnixNano() / int64(time.Millisecond)
-
-	for _, id := range ids {
-		buf := make([]byte, 16)
-		binary.BigEndian.PutUint64(buf, id)
-		binary.BigEndian.PutUint64(buf[8:], uint64(ts))
-
-		if err := tl.diffs.Put(buf, []byte{0}); err != nil {
+		if err := tl.diffs.Put(buf, []byte{byte(state)}); err != nil {
 			return err
 		}
 	}
