@@ -31,6 +31,7 @@ func TestBoltTimelineIterator(t *testing.T) {
 	}
 
 	var cases = []struct {
+		base  []uint64
 		diffs []diff
 		res   []uint64
 		ts    uint64
@@ -41,6 +42,15 @@ func TestBoltTimelineIterator(t *testing.T) {
 				{100, 20, false},
 			},
 			res: []uint64{},
+			ts:  1000,
+		},
+		{
+			base: []uint64{1, 2, 3, 100},
+			diffs: []diff{
+				{100, 10, true},
+				{100, 20, false},
+			},
+			res: []uint64{1, 2, 3},
 			ts:  1000,
 		},
 		{
@@ -78,6 +88,23 @@ func TestBoltTimelineIterator(t *testing.T) {
 			res: []uint64{2, 99, 123},
 			ts:  50,
 		},
+		{
+			base: []uint64{50, 51, 100},
+			diffs: []diff{
+				{100, 10, true},
+				{100, 50, false},
+				{2, 50, true},
+				{123, 5, true},
+				{123, 20, false},
+				{123, 49, true},
+				{99, 1, false},
+				{99, 2, true},
+				{1, 51, true},
+				{2, 51, false},
+			},
+			res: []uint64{2, 50, 51, 99, 123},
+			ts:  50,
+		},
 	}
 
 	for i, c := range cases {
@@ -109,9 +136,16 @@ func TestBoltTimelineIterator(t *testing.T) {
 		ts := make([]byte, 8)
 		binary.BigEndian.PutUint64(ts, c.ts)
 
+		if c.base == nil {
+			c.base = []uint64{}
+		}
+
 		it := &boltTimelineIterator{
-			c:  b.Cursor(),
-			ts: ts,
+			base: newPlainListIterator(c.base),
+			diffs: &boltTimelineDiffIterator{
+				c:   b.Cursor(),
+				max: ts,
+			},
 		}
 		res, err := expandIterator(it)
 		if err != nil {

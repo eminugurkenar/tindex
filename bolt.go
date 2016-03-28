@@ -492,8 +492,11 @@ func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
 	binary.BigEndian.PutUint64(buf, uint64(ts))
 
 	return &boltTimelineIterator{
-		ts: buf,
-		c:  tl.diffs.Cursor(),
+		base: newPlainListIterator([]uint64{}),
+		diffs: &boltTimelineDiffIterator{
+			max: buf,
+			c:   tl.diffs.Cursor(),
+		},
 	}, nil
 }
 
@@ -571,7 +574,6 @@ func (tl *boltTimelineDiffIterator) next() (uint64, bool, error) {
 }
 
 func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
-	fmt.Println("seek", v)
 	buf := make([]byte, 16)
 	binary.BigEndian.PutUint64(buf, v)
 	tl.k, tl.v = tl.c.Seek(buf)
@@ -579,47 +581,116 @@ func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
 }
 
 type boltTimelineIterator struct {
-	c  *bolt.Cursor
-	ts []byte
+	base  iterator
+	diffs *boltTimelineDiffIterator
 
-	k, v []byte
+	bv, dv uint64
+	be, de error
+	ds     bool
 }
 
 func (tl *boltTimelineIterator) next() (uint64, error) {
-	var exist bool
-	k, v := tl.k, tl.v
-Outer:
-	for !exist {
-		for {
-			if k == nil {
-				break Outer
+	var x uint64
+	for {
+		if tl.be == io.EOF && tl.de == io.EOF {
+			return 0, io.EOF
+		}
+		if tl.be != nil {
+			if tl.be == io.EOF {
+				if tl.ds {
+					x = tl.dv
+					tl.dv, tl.ds, tl.de = tl.diffs.next()
+					break
+				}
+				// Deletion of something not in the base, nothing to do.
+				tl.dv, tl.ds, tl.de = tl.diffs.next()
+				continue
 			}
-			if exist && !bytes.Equal(k[:8], tl.k[:8]) {
+			return 0, tl.be
+		}
+		if tl.de != nil {
+			if tl.de == io.EOF {
+				x = tl.bv
+				tl.bv, tl.be = tl.base.next()
 				break
 			}
-			if bytes.Compare(k[8:], tl.ts) > 0 {
-				buf := make([]byte, 16)
-				binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(k[:8])+1)
-				k, v = tl.c.Seek(buf)
+			return 0, tl.de
+		}
+		if tl.bv > tl.dv {
+			if tl.ds {
+				x = tl.dv
+				tl.dv, tl.ds, tl.de = tl.diffs.next()
 				break
 			}
-			exist = v[0] == 1
-			tl.k, tl.v = k, v
-			k, v = tl.c.Next()
+			// Deletion of something not in the base, nothing to do.
+			tl.dv, tl.ds, tl.de = tl.diffs.next()
+			continue
+		}
+		// The next diff is larger than the base. Emit everything that's
+		// in the base.
+		if tl.dv > tl.bv {
+			x = tl.bv
+			tl.bv, tl.be = tl.base.next()
+			break
+		}
+
+		// diff affects current base head.
+		if tl.ds {
+			x = tl.bv
+			tl.dv, tl.ds, tl.de = tl.diffs.next()
+			tl.bv, tl.be = tl.base.next()
+			break
+		} else {
+			tl.dv, tl.ds, tl.de = tl.diffs.next()
+			tl.bv, tl.be = tl.base.next()
+			// Skip as the base entry was deleted.
+			continue
 		}
 	}
-	if tl.k == nil || !exist {
-		return 0, io.EOF
-	}
-	x := binary.BigEndian.Uint64(tl.k)
-	tl.k, tl.v = k, v
-
 	return x, nil
 }
 
-func (tl *boltTimelineIterator) seek(x uint64) (uint64, error) {
-	buf := make([]byte, 16)
-	binary.BigEndian.PutUint64(buf, x)
-	tl.k, tl.v = tl.c.Seek(buf)
+func (tl *boltTimelineIterator) seek(v uint64) (uint64, error) {
+	tl.bv, tl.be = tl.base.seek(v)
+	tl.dv, tl.ds, tl.de = tl.diffs.seek(v)
 	return tl.next()
 }
+
+// func (tl *boltTimelineIterator) next() (uint64, error) {
+// 	var exist bool
+// 	k, v := tl.k, tl.v
+// Outer:
+// 	for !exist {
+// 		for {
+// 			if k == nil {
+// 				break Outer
+// 			}
+// 			if exist && !bytes.Equal(k[:8], tl.k[:8]) {
+// 				break
+// 			}
+// 			if bytes.Compare(k[8:], tl.ts) > 0 {
+// 				buf := make([]byte, 16)
+// 				binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(k[:8])+1)
+// 				k, v = tl.c.Seek(buf)
+// 				break
+// 			}
+// 			exist = v[0] == 1
+// 			tl.k, tl.v = k, v
+// 			k, v = tl.c.Next()
+// 		}
+// 	}
+// 	if tl.k == nil || !exist {
+// 		return 0, io.EOF
+// 	}
+// 	x := binary.BigEndian.Uint64(tl.k)
+// 	tl.k, tl.v = k, v
+
+// 	return x, nil
+// }
+
+// func (tl *boltTimelineIterator) seek(x uint64) (uint64, error) {
+// 	buf := make([]byte, 16)
+// 	binary.BigEndian.PutUint64(buf, x)
+// 	tl.k, tl.v = tl.c.Seek(buf)
+// 	return tl.next()
+// }
