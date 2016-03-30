@@ -102,6 +102,18 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 	if b == nil {
 		return nil, errNotFound
 	}
+	fmt.Println("skiplist")
+	bit := &boltSkiplistCursor{
+		k:   k,
+		c:   b.Cursor(),
+		bkt: b,
+	}
+	var ka, v uint64
+	var err error
+	for ka, v, err = bit.seek(k); err == nil; ka, v, err = bit.next() {
+		fmt.Printf("| %v %v | ", ka, v)
+	}
+	fmt.Printf("%s\n", err)
 
 	it := &skipIterator{
 		skiplist: &boltSkiplistCursor{
@@ -119,6 +131,13 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 			return newPageDelta(data).cursor(), nil
 		}),
 	}
+
+	bla, err := it.iterators.get(2)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("page 2")
+	fmt.Println(expandIterator(bla))
 	return it, nil
 }
 
@@ -494,6 +513,7 @@ func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
 	return &boltTimelineIterator{
 		base: newPlainListIterator([]uint64{}),
 		diffs: &boltTimelineDiffIterator{
+			min: make([]byte, 8),
 			max: buf,
 			c:   tl.diffs.Cursor(),
 		},
@@ -501,7 +521,24 @@ func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
 }
 
 func (tl *boltTimelineTx) Range(start, end time.Time) (iterator, error) {
-	return nil, nil
+	tstart := encodeUint64(uint64(start.UnixNano() / int64(time.Millisecond)))
+	tend := encodeUint64(uint64(end.UnixNano() / int64(time.Millisecond)))
+
+	return &boltTimelineIterator{
+		base: &boltTimelineIterator{
+			base: newPlainListIterator([]uint64{}),
+			diffs: &boltTimelineDiffIterator{
+				max: tstart,
+				c:   tl.diffs.Cursor(),
+			},
+		},
+		diffs: &boltTimelineDiffIterator{
+			min: tstart,
+			max: tend,
+			c:   tl.diffs.Cursor(),
+		},
+		discardDels: true,
+	}, nil
 }
 
 type diffState byte
@@ -528,8 +565,8 @@ func (tl *boltTimelineTx) SetDiff(t time.Time, state diffState, ids ...uint64) e
 }
 
 type boltTimelineDiffIterator struct {
-	c   *bolt.Cursor
-	max []byte
+	c        *bolt.Cursor
+	min, max []byte
 
 	k, v []byte
 }
@@ -556,12 +593,20 @@ func (tl *boltTimelineDiffIterator) next() (uint64, bool, error) {
 		// state of ID at max.
 		if bytes.Compare(tl.k[8:], tl.max) > 0 {
 			buf := make([]byte, 16)
+			copy(buf[8:], tl.min)
 			binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(tl.k[:8])+1)
+
 			tl.k, tl.v = tl.c.Seek(buf)
 			// If we were already reading a value, return it first.
 			if last != nil {
 				break
 			}
+		} else if bytes.Compare(tl.k[8:], tl.min) < 0 {
+			buf := make([]byte, 16)
+			copy(buf[8:], tl.min)
+			copy(buf[:8], tl.k[:8])
+
+			tl.k, tl.v = tl.c.Seek(buf)
 		} else {
 			// A new diff within our time window. Evaluate most recent state
 			// and advance.
@@ -575,6 +620,7 @@ func (tl *boltTimelineDiffIterator) next() (uint64, bool, error) {
 
 func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
 	buf := make([]byte, 16)
+	copy(buf[8:], tl.min)
 	binary.BigEndian.PutUint64(buf, v)
 	tl.k, tl.v = tl.c.Seek(buf)
 	return tl.next()
@@ -583,6 +629,8 @@ func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
 type boltTimelineIterator struct {
 	base  iterator
 	diffs *boltTimelineDiffIterator
+
+	discardDels bool
 
 	bv, dv uint64
 	be, de error
@@ -635,7 +683,7 @@ func (tl *boltTimelineIterator) next() (uint64, error) {
 		}
 
 		// diff affects current base head.
-		if tl.ds {
+		if tl.discardDels || tl.ds {
 			x = tl.bv
 			tl.dv, tl.ds, tl.de = tl.diffs.next()
 			tl.bv, tl.be = tl.base.next()
@@ -655,42 +703,3 @@ func (tl *boltTimelineIterator) seek(v uint64) (uint64, error) {
 	tl.dv, tl.ds, tl.de = tl.diffs.seek(v)
 	return tl.next()
 }
-
-// func (tl *boltTimelineIterator) next() (uint64, error) {
-// 	var exist bool
-// 	k, v := tl.k, tl.v
-// Outer:
-// 	for !exist {
-// 		for {
-// 			if k == nil {
-// 				break Outer
-// 			}
-// 			if exist && !bytes.Equal(k[:8], tl.k[:8]) {
-// 				break
-// 			}
-// 			if bytes.Compare(k[8:], tl.ts) > 0 {
-// 				buf := make([]byte, 16)
-// 				binary.BigEndian.PutUint64(buf, binary.BigEndian.Uint64(k[:8])+1)
-// 				k, v = tl.c.Seek(buf)
-// 				break
-// 			}
-// 			exist = v[0] == 1
-// 			tl.k, tl.v = k, v
-// 			k, v = tl.c.Next()
-// 		}
-// 	}
-// 	if tl.k == nil || !exist {
-// 		return 0, io.EOF
-// 	}
-// 	x := binary.BigEndian.Uint64(tl.k)
-// 	tl.k, tl.v = k, v
-
-// 	return x, nil
-// }
-
-// func (tl *boltTimelineIterator) seek(x uint64) (uint64, error) {
-// 	buf := make([]byte, 16)
-// 	binary.BigEndian.PutUint64(buf, x)
-// 	tl.k, tl.v = tl.c.Seek(buf)
-// 	return tl.next()
-// }

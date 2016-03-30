@@ -172,9 +172,9 @@ func TestTimelineDiffIterator(t *testing.T) {
 	}
 
 	var cases = []struct {
-		diffs []diff
-		res   []pair
-		ts    uint64
+		diffs    []diff
+		res      []pair
+		min, max uint64
 	}{
 		{
 			diffs: []diff{
@@ -184,7 +184,20 @@ func TestTimelineDiffIterator(t *testing.T) {
 			res: []pair{
 				{100, false},
 			},
-			ts: 1000,
+			max: 1000,
+		},
+		{
+			diffs: []diff{
+				{100, 10, true},
+				{100, 20, false},
+				{50, 10, true},
+				{50, 500, false},
+			},
+			res: []pair{
+				{50, false},
+			},
+			min: 500,
+			max: 1000,
 		},
 		{
 			diffs: []diff{
@@ -196,7 +209,7 @@ func TestTimelineDiffIterator(t *testing.T) {
 			res: []pair{
 				{100, true},
 			},
-			ts: 1000,
+			max: 1000,
 		},
 		{
 			diffs: []diff{
@@ -207,7 +220,7 @@ func TestTimelineDiffIterator(t *testing.T) {
 			res: []pair{
 				{100, false},
 			},
-			ts: 20,
+			max: 20,
 		},
 		{
 			diffs: []diff{
@@ -230,7 +243,7 @@ func TestTimelineDiffIterator(t *testing.T) {
 				{122, false},
 				{123, true},
 			},
-			ts: 50,
+			max: 50,
 		},
 	}
 
@@ -262,12 +275,11 @@ func TestTimelineDiffIterator(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		ts := make([]byte, 8)
-		binary.BigEndian.PutUint64(ts, c.ts)
 
 		it := &boltTimelineDiffIterator{
 			c:   bkt.Cursor(),
-			max: ts,
+			min: encodeUint64(c.min),
+			max: encodeUint64(c.max),
 		}
 		res := []pair{}
 		var k uint64

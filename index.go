@@ -18,7 +18,7 @@ var (
 
 type Index interface {
 	Instant(at time.Time, ms ...Matcher) ([]uint64, error)
-	// Range(m []Matcher, from, to time.Time) ([]uint64, error)
+	Range(from, to time.Time, ms ...Matcher) ([]uint64, error)
 
 	Series(id uint64) (map[string]string, error)
 	EnsureSeries(labels map[string]string) (uint64, error)
@@ -204,6 +204,7 @@ func (ix *index) EnsureSeries(labels map[string]string) (sid uint64, err error) 
 	}
 
 	for _, k := range skey {
+		fmt.Println("append for key", k, sid)
 		if err := ptx.append(k, sid); err != nil {
 			ptx.Rollback()
 			return sid, err
@@ -255,6 +256,57 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 		if err != nil {
 			return nil, err
 		}
+		fmt.Println("get postings for ids", ids)
+		var mits []iterator
+		for _, id := range ids {
+			it, err := ptx.iter(id)
+			if err != nil {
+				return nil, err
+			}
+			fmt.Println("id", id)
+			fmt.Println(expandIterator(it))
+			mits = append(mits, it)
+		}
+		its = append(its, merge(mits...))
+	}
+
+	ttx, err := ix.timelineStore.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	defer ttx.Rollback()
+
+	fmt.Println(expandIterator(intersect(its...)))
+
+	it, err := ttx.Instant(ts)
+	if err != nil {
+		return nil, err
+	}
+	its = append(its, it)
+
+	res, err := expandIterator(intersect(its...))
+	return res, err
+}
+
+func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
+	stx, err := ix.seriesStore.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	defer stx.Rollback()
+
+	ptx, err := ix.postingsStore.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	defer ptx.Rollback()
+
+	var its []iterator
+	for _, m := range ms {
+		ids, err := stx.labels(m)
+		if err != nil {
+			return nil, err
+		}
 		var mits []iterator
 		for _, id := range ids {
 			it, err := ptx.iter(id)
@@ -272,7 +324,7 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	defer ttx.Rollback()
 
-	it, err := ttx.Instant(ts)
+	it, err := ttx.Range(start, end)
 	if err != nil {
 		return nil, err
 	}
