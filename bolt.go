@@ -80,13 +80,13 @@ type boltPostingsTx struct {
 	postings *bolt.Bucket
 }
 
-type iteratorStoreFunc func(k uint64) (iterator, error)
+type iteratorStoreFunc func(k uint64) (Iterator, error)
 
-func (s iteratorStoreFunc) get(k uint64) (iterator, error) {
+func (s iteratorStoreFunc) get(k uint64) (Iterator, error) {
 	return s(k)
 }
 
-func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
+func (p *boltPostingsTx) iter(k uint64) (Iterator, error) {
 	b := p.skiplist.Bucket(encodeUint64(k))
 	if b == nil {
 		return nil, errNotFound
@@ -110,7 +110,7 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 			c:   b.Cursor(),
 			bkt: b,
 		},
-		iterators: iteratorStoreFunc(func(k uint64) (iterator, error) {
+		iterators: iteratorStoreFunc(func(k uint64) (Iterator, error) {
 			data := p.postings.Get(encodeUint64(k))
 			if data == nil {
 				return nil, errNotFound
@@ -126,7 +126,7 @@ func (p *boltPostingsTx) iter(k uint64) (iterator, error) {
 		panic(err)
 	}
 	fmt.Println("page 2")
-	fmt.Println(expandIterator(bla))
+	fmt.Println(ExpandIterator(bla))
 	return it, nil
 }
 
@@ -302,7 +302,7 @@ type boltTimelineTx struct {
 	diffs     *bolt.Bucket
 }
 
-func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
+func (tl *boltTimelineTx) Instant(t time.Time) (Iterator, error) {
 	ts := t.UnixNano() / int64(time.Millisecond)
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, uint64(ts))
@@ -317,7 +317,7 @@ func (tl *boltTimelineTx) Instant(t time.Time) (iterator, error) {
 	}, nil
 }
 
-func (tl *boltTimelineTx) Range(start, end time.Time) (iterator, error) {
+func (tl *boltTimelineTx) Range(start, end time.Time) (Iterator, error) {
 	tstart := encodeUint64(uint64(start.UnixNano() / int64(time.Millisecond)))
 	tend := encodeUint64(uint64(end.UnixNano() / int64(time.Millisecond)))
 
@@ -424,7 +424,7 @@ func (tl *boltTimelineDiffIterator) seek(v uint64) (uint64, bool, error) {
 }
 
 type boltTimelineIterator struct {
-	base  iterator
+	base  Iterator
 	diffs *boltTimelineDiffIterator
 
 	discardDels bool
@@ -434,7 +434,7 @@ type boltTimelineIterator struct {
 	ds     bool
 }
 
-func (tl *boltTimelineIterator) next() (uint64, error) {
+func (tl *boltTimelineIterator) Next() (uint64, error) {
 	var x uint64
 	for {
 		if tl.be == io.EOF && tl.de == io.EOF {
@@ -456,7 +456,7 @@ func (tl *boltTimelineIterator) next() (uint64, error) {
 		if tl.de != nil {
 			if tl.de == io.EOF {
 				x = tl.bv
-				tl.bv, tl.be = tl.base.next()
+				tl.bv, tl.be = tl.base.Next()
 				break
 			}
 			return 0, tl.de
@@ -475,7 +475,7 @@ func (tl *boltTimelineIterator) next() (uint64, error) {
 		// in the base.
 		if tl.dv > tl.bv {
 			x = tl.bv
-			tl.bv, tl.be = tl.base.next()
+			tl.bv, tl.be = tl.base.Next()
 			break
 		}
 
@@ -483,11 +483,11 @@ func (tl *boltTimelineIterator) next() (uint64, error) {
 		if tl.discardDels || tl.ds {
 			x = tl.bv
 			tl.dv, tl.ds, tl.de = tl.diffs.next()
-			tl.bv, tl.be = tl.base.next()
+			tl.bv, tl.be = tl.base.Next()
 			break
 		} else {
 			tl.dv, tl.ds, tl.de = tl.diffs.next()
-			tl.bv, tl.be = tl.base.next()
+			tl.bv, tl.be = tl.base.Next()
 			// Skip as the base entry was deleted.
 			continue
 		}
@@ -495,8 +495,8 @@ func (tl *boltTimelineIterator) next() (uint64, error) {
 	return x, nil
 }
 
-func (tl *boltTimelineIterator) seek(v uint64) (uint64, error) {
-	tl.bv, tl.be = tl.base.seek(v)
+func (tl *boltTimelineIterator) Seek(v uint64) (uint64, error) {
+	tl.bv, tl.be = tl.base.Seek(v)
 	tl.dv, tl.ds, tl.de = tl.diffs.seek(v)
-	return tl.next()
+	return tl.Next()
 }

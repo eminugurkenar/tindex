@@ -147,7 +147,7 @@ func TestBoltTimelineIterator(t *testing.T) {
 				max: ts,
 			},
 		}
-		res, err := expandIterator(it)
+		res, err := ExpandIterator(it)
 		if err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}

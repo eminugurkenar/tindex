@@ -36,7 +36,7 @@ func TestPageDelta(t *testing.T) {
 		num++
 	}
 
-	res, err := expandIterator(pc)
+	res, err := ExpandIterator(pc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func BenchmarkPageDeltaRead(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := expandIterator(pc); err != nil {
+		if _, err := ExpandIterator(pc); err != nil {
 			b.Fatal(err)
 		}
 	}

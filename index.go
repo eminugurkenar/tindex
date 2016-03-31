@@ -103,7 +103,7 @@ type postingsStore interface {
 type postingsTx interface {
 	Tx
 	// iter returns a new iterator on the postings list for k.
-	iter(k uint64) (iterator, error)
+	iter(k uint64) (Iterator, error)
 	// append adds the ID to the end of the postings list for k. The ID must
 	// be strictly larger than the last value in the list.
 	append(k, id uint64) error
@@ -117,10 +117,10 @@ type timelineStore interface {
 type timelineTx interface {
 	Tx
 	// Returns an iterator of document IDs that were valid at the given time.
-	Instant(t time.Time) (iterator, error)
+	Instant(t time.Time) (Iterator, error)
 	// Returns an iterator of document IDs that were valid at some point
 	// during the given range.
-	Range(start, end time.Time) (iterator, error)
+	Range(start, end time.Time) (Iterator, error)
 
 	SetDiff(t time.Time, s diffState, ids ...uint64) error
 }
@@ -213,13 +213,13 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	defer ptx.Rollback()
 
-	var its []iterator
+	var its []Iterator
 	for _, m := range ms {
 		ids, err := ix.labels.Search(m)
 		if err != nil {
 			return nil, err
 		}
-		var mits []iterator
+		var mits []Iterator
 		for _, id := range ids {
 			it, err := ptx.iter(id)
 			if err != nil {
@@ -227,7 +227,7 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 			}
 			mits = append(mits, it)
 		}
-		its = append(its, merge(mits...))
+		its = append(its, Merge(mits...))
 	}
 
 	ttx, err := ix.timelineStore.Begin(false)
@@ -236,7 +236,7 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	defer ttx.Rollback()
 
-	fmt.Println(expandIterator(intersect(its...)))
+	fmt.Println(ExpandIterator(Intersect(its...)))
 
 	it, err := ttx.Instant(ts)
 	if err != nil {
@@ -244,7 +244,7 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	its = append(its, it)
 
-	res, err := expandIterator(intersect(its...))
+	res, err := ExpandIterator(Intersect(its...))
 	return res, err
 }
 
@@ -255,13 +255,13 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	defer ptx.Rollback()
 
-	var its []iterator
+	var its []Iterator
 	for _, m := range ms {
 		ids, err := ix.labels.Search(m)
 		if err != nil {
 			return nil, err
 		}
-		var mits []iterator
+		var mits []Iterator
 		for _, id := range ids {
 			it, err := ptx.iter(id)
 			if err != nil {
@@ -269,7 +269,7 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 			}
 			mits = append(mits, it)
 		}
-		its = append(its, merge(mits...))
+		its = append(its, Merge(mits...))
 	}
 
 	ttx, err := ix.timelineStore.Begin(false)
@@ -284,6 +284,6 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	its = append(its, it)
 
-	res, err := expandIterator(intersect(its...))
+	res, err := ExpandIterator(Intersect(its...))
 	return res, err
 }

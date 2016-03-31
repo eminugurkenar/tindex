@@ -11,7 +11,7 @@ const pageSize = 2048
 var errPageFull = errors.New("page full")
 
 type pageCursor interface {
-	iterator
+	Iterator
 	append(v uint64) error
 }
 
@@ -51,8 +51,8 @@ type pageDeltaCursor struct {
 
 func (p *pageDeltaCursor) append(id uint64) error {
 	// Run to the end.
-	_, err := p.next()
-	for ; err == nil; _, err = p.next() {
+	_, err := p.Next()
+	for ; err == nil; _, err = p.Next() {
 		// Consume.
 	}
 	if err != io.EOF {
@@ -70,19 +70,19 @@ func (p *pageDeltaCursor) append(id uint64) error {
 	return nil
 }
 
-func (p *pageDeltaCursor) seek(min uint64) (v uint64, err error) {
+func (p *pageDeltaCursor) Seek(min uint64) (v uint64, err error) {
 	if min < p.cur {
 		p.pos = 0
 	} else if min == p.cur {
 		return p.cur, nil
 	}
-	for v, err = p.next(); err == nil && v < min; v, err = p.next() {
+	for v, err = p.Next(); err == nil && v < min; v, err = p.Next() {
 		// Consume.
 	}
 	return p.cur, err
 }
 
-func (p *pageDeltaCursor) next() (uint64, error) {
+func (p *pageDeltaCursor) Next() (uint64, error) {
 	var n int
 	if p.pos == 0 {
 		p.cur, n = binary.Uvarint(p.data)

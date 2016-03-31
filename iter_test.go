@@ -23,7 +23,7 @@ func TestMultiIntersect(t *testing.T) {
 		i2 := newPlainListIterator(c.b)
 		i3 := newPlainListIterator(c.c)
 
-		res, err := expandIterator(intersect(i1, i2, i3))
+		res, err := ExpandIterator(Intersect(i1, i2, i3))
 		if err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}
@@ -63,7 +63,7 @@ func TestIntersectIterator(t *testing.T) {
 		i1 := newPlainListIterator(c.a)
 		i2 := newPlainListIterator(c.b)
 
-		res, err := expandIterator(&intersectIterator{i1: i1, i2: i2})
+		res, err := ExpandIterator(&intersectIterator{i1: i1, i2: i2})
 		if err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}
@@ -91,7 +91,7 @@ func TestMergeIntersect(t *testing.T) {
 		i2 := newPlainListIterator(c.b)
 		i3 := newPlainListIterator(c.c)
 
-		res, err := expandIterator(merge(i1, i2, i3))
+		res, err := ExpandIterator(Merge(i1, i2, i3))
 		if err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}
@@ -128,7 +128,7 @@ func BenchmarkIntersect(t *testing.B) {
 	t.ResetTimer()
 
 	for i := 0; i < t.N; i++ {
-		intersect(i1, i2, i3, i4)
+		Intersect(i1, i2, i3, i4)
 	}
 }
 
@@ -158,7 +158,7 @@ func TestMergeIterator(t *testing.T) {
 		i1 := newPlainListIterator(c.a)
 		i2 := newPlainListIterator(c.b)
 
-		res, err := expandIterator(&mergeIterator{i1: i1, i2: i2})
+		res, err := ExpandIterator(&mergeIterator{i1: i1, i2: i2})
 		if err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}
@@ -205,7 +205,7 @@ func TestSkipIterator(t *testing.T) {
 			skiplist:  c.skiplist,
 			iterators: c.its,
 		}
-		res, err := expandIterator(it)
+		res, err := ExpandIterator(it)
 		if err != nil {
 			t.Fatalf("Unexpected error", err)
 		}
@@ -215,9 +215,9 @@ func TestSkipIterator(t *testing.T) {
 	}
 }
 
-type testIteratorStore map[uint64]iterator
+type testIteratorStore map[uint64]Iterator
 
-func (s testIteratorStore) get(id uint64) (iterator, error) {
+func (s testIteratorStore) get(id uint64) (Iterator, error) {
 	it, ok := s[id]
 	if !ok {
 		return nil, errNotFound
