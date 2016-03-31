@@ -168,7 +168,7 @@ func TestMergeIterator(t *testing.T) {
 	}
 }
 
-func TestSkipIterator(t *testing.T) {
+func TestSkippingIterator(t *testing.T) {
 	var cases = []struct {
 		skiplist skiplistIterator
 		its      iteratorStore
@@ -201,7 +201,7 @@ func TestSkipIterator(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		it := &skipIterator{
+		it := &skippingIterator{
 			skiplist:  c.skiplist,
 			iterators: c.its,
 		}

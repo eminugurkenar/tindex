@@ -13,8 +13,8 @@ var (
 )
 
 type Index interface {
-	Instant(at time.Time, ms ...Matcher) ([]uint64, error)
-	Range(from, to time.Time, ms ...Matcher) ([]uint64, error)
+	Instant(at time.Time, ms ...Matcher) (Iterator, error)
+	Range(from, to time.Time, ms ...Matcher) (Iterator, error)
 
 	Sets(id ...uint64) ([]Set, error)
 	EnsureSets(ls ...Set) ([]uint64, error)
@@ -42,19 +42,12 @@ func Open(path string, opts *Options) (Index, error) {
 	if opts == nil {
 		opts = DefaultOptions
 	}
-	createPostingsStore, ok := postingsStores[opts.PostingsStore]
-	if !ok {
-		return nil, fmt.Errorf("unknown postings store %q", opts.PostingsStore)
-	}
+
 	createTimelineStore, ok := timelineStores[opts.TimelineStore]
 	if !ok {
 		return nil, fmt.Errorf("unknown timeline store %q", opts.TimelineStore)
 	}
 
-	ps, err := createPostingsStore(filepath.Join(path, "postings", opts.PostingsStore))
-	if err != nil {
-		return nil, err
-	}
 	ts, err := createTimelineStore(filepath.Join(path, "timeline", opts.TimelineStore))
 	if err != nil {
 		return nil, err
@@ -67,23 +60,22 @@ func Open(path string, opts *Options) (Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	ps, err := NewPostings(filepath.Join(path, "postings"))
+	if err != nil {
+		return nil, err
+	}
 
 	ix := &index{
 		labels:        ls,
 		labelSets:     lss,
-		postingsStore: ps,
+		postings:      ps,
 		timelineStore: ts,
 	}
 	return ix, nil
 }
 
-// seperator is a byte that cannot occur in a valid UTF-8 sequence. It can thus
-// be used to mark boundaries between serialized strings.
-const seperator = byte('\xff')
-
 // Constructors for registered stores.
 var (
-	postingsStores = map[string]func(path string) (postingsStore, error){}
 	timelineStores = map[string]func(path string) (timelineStore, error){}
 )
 
@@ -91,22 +83,6 @@ var (
 type Tx interface {
 	Commit() error
 	Rollback() error
-}
-
-// A postingsStore can start a postingsTx on postings lists.
-type postingsStore interface {
-	Begin(writable bool) (postingsTx, error)
-	Close() error
-}
-
-// A postingsTx is a transactions on postings lists associated with a key.
-type postingsTx interface {
-	Tx
-	// iter returns a new iterator on the postings list for k.
-	iter(k uint64) (Iterator, error)
-	// append adds the ID to the end of the postings list for k. The ID must
-	// be strictly larger than the last value in the list.
-	append(k, id uint64) error
 }
 
 type timelineStore interface {
@@ -131,7 +107,7 @@ type index struct {
 
 	labelSets     LabelSets
 	labels        Labels
-	postingsStore postingsStore
+	postings      Postings
 	timelineStore timelineStore
 }
 
@@ -142,7 +118,7 @@ func (ix *index) Close() error {
 	if err := ix.labels.Close(); err != nil {
 		return err
 	}
-	return ix.postingsStore.Close()
+	return ix.postings.Close()
 }
 
 func (ix *index) Sync() error {
@@ -161,25 +137,21 @@ func (ix *index) EnsureSets(sets ...Set) (ids []uint64, err error) {
 		return nil, err
 	}
 
-	ptx, err := ix.postingsStore.Begin(true)
-	if err != nil {
-		return ids, err
-	}
+	batches := PostingsBatches{}
 
+	// The SetKey for existing sets are nil. New ones are returned in increasing
+	// order. Thus, we can create batches in order of the IDs.
 	for i, id := range ids {
 		if skeys[i] == nil {
 			continue
 		}
-
-		for _, k := range skeys[i] {
-			if err := ptx.append(k, id); err != nil {
-				ptx.Rollback()
-				return ids, err
-			}
+		if _, ok := batches[id]; ok {
+			return nil, fmt.Errorf("Batch for ID %q already exists", id)
 		}
+		batches[id] = append(batches[id], id)
 	}
 
-	return ids, ptx.Commit()
+	return ids, ix.postings.Append(batches)
 }
 
 func (ix *index) See(ts time.Time, id uint64) error {
@@ -206,28 +178,36 @@ func (ix *index) Unsee(ts time.Time, id uint64) error {
 	return tx.Commit()
 }
 
-func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
-	ptx, err := ix.postingsStore.Begin(false)
-	if err != nil {
-		return nil, err
-	}
-	defer ptx.Rollback()
+func (ix *index) matchIter(matchers ...Matcher) (Iterator, error) {
+	// The union of iterators for a single matcher are merged.
+	// The merge iterators of each matcher are then intersected.
+	its := make([]Iterator, 0, len(matchers))
 
-	var its []Iterator
-	for _, m := range ms {
-		ids, err := ix.labels.Search(m)
+	for _, m := range matchers {
+		keys, err := ix.labels.Search(m)
 		if err != nil {
 			return nil, err
 		}
-		var mits []Iterator
-		for _, id := range ids {
-			it, err := ptx.iter(id)
+		mits := make([]Iterator, 0, len(keys))
+
+		for _, k := range keys {
+			it, err := ix.postings.Iter(k)
 			if err != nil {
 				return nil, err
 			}
 			mits = append(mits, it)
 		}
+
 		its = append(its, Merge(mits...))
+	}
+
+	return Intersect(its...), nil
+}
+
+func (ix *index) Instant(ts time.Time, ms ...Matcher) (Iterator, error) {
+	mit, err := ix.matchIter(ms...)
+	if err != nil {
+		return nil, err
 	}
 
 	ttx, err := ix.timelineStore.Begin(false)
@@ -236,40 +216,15 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 	}
 	defer ttx.Rollback()
 
-	fmt.Println(ExpandIterator(Intersect(its...)))
-
 	it, err := ttx.Instant(ts)
-	if err != nil {
-		return nil, err
-	}
-	its = append(its, it)
 
-	res, err := ExpandIterator(Intersect(its...))
-	return res, err
+	return Intersect(mit, it), err
 }
 
-func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
-	ptx, err := ix.postingsStore.Begin(false)
+func (ix *index) Range(start, end time.Time, ms ...Matcher) (Iterator, error) {
+	mit, err := ix.matchIter(ms...)
 	if err != nil {
 		return nil, err
-	}
-	defer ptx.Rollback()
-
-	var its []Iterator
-	for _, m := range ms {
-		ids, err := ix.labels.Search(m)
-		if err != nil {
-			return nil, err
-		}
-		var mits []Iterator
-		for _, id := range ids {
-			it, err := ptx.iter(id)
-			if err != nil {
-				return nil, err
-			}
-			mits = append(mits, it)
-		}
-		its = append(its, Merge(mits...))
 	}
 
 	ttx, err := ix.timelineStore.Begin(false)
@@ -279,11 +234,6 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 	defer ttx.Rollback()
 
 	it, err := ttx.Range(start, end)
-	if err != nil {
-		return nil, err
-	}
-	its = append(its, it)
 
-	res, err := ExpandIterator(Intersect(its...))
-	return res, err
+	return Intersect(mit, it), err
 }

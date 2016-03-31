@@ -70,11 +70,13 @@ func (p *pageDeltaCursor) append(id uint64) error {
 	return nil
 }
 
+func (p *pageDeltaCursor) Close() error {
+	return nil
+}
+
 func (p *pageDeltaCursor) Seek(min uint64) (v uint64, err error) {
 	if min < p.cur {
 		p.pos = 0
-	} else if min == p.cur {
-		return p.cur, nil
 	}
 	for v, err = p.Next(); err == nil && v < min; v, err = p.Next() {
 		// Consume.
