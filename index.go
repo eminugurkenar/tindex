@@ -1,13 +1,9 @@
 package tindex
 
 import (
-	// "bytes"
-	"encoding/binary"
 	"errors"
-	"path/filepath"
-	"regexp"
-	// "sort"
 	"fmt"
+	"path/filepath"
 	"time"
 )
 
@@ -20,14 +16,13 @@ type Index interface {
 	Instant(at time.Time, ms ...Matcher) ([]uint64, error)
 	Range(from, to time.Time, ms ...Matcher) ([]uint64, error)
 
-	Series(id uint64) (map[string]string, error)
-	EnsureSeries(labels map[string]string) (uint64, error)
+	Sets(id ...uint64) ([]Set, error)
+	EnsureSets(ls ...Set) ([]uint64, error)
 
 	See(ts time.Time, id uint64) error
 	Unsee(ts time.Time, id uint64) error
 
 	Close() error
-	Sync() error
 }
 
 type Options struct {
@@ -47,10 +42,6 @@ func Open(path string, opts *Options) (Index, error) {
 	if opts == nil {
 		opts = DefaultOptions
 	}
-	createSeriesStore, ok := seriesStores[opts.SeriesStore]
-	if !ok {
-		return nil, fmt.Errorf("unknown series store %q", opts.SeriesStore)
-	}
 	createPostingsStore, ok := postingsStores[opts.PostingsStore]
 	if !ok {
 		return nil, fmt.Errorf("unknown postings store %q", opts.PostingsStore)
@@ -60,10 +51,6 @@ func Open(path string, opts *Options) (Index, error) {
 		return nil, fmt.Errorf("unknown timeline store %q", opts.TimelineStore)
 	}
 
-	ss, err := createSeriesStore(filepath.Join(path, "series", opts.SeriesStore))
-	if err != nil {
-		return nil, err
-	}
 	ps, err := createPostingsStore(filepath.Join(path, "postings", opts.PostingsStore))
 	if err != nil {
 		return nil, err
@@ -72,9 +59,18 @@ func Open(path string, opts *Options) (Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	ls, err := NewLabels(filepath.Join(path, "labels"))
+	if err != nil {
+		return nil, err
+	}
+	lss, err := NewLabelSets(filepath.Join(path, "label_sets"), ls)
+	if err != nil {
+		return nil, err
+	}
 
 	ix := &index{
-		seriesStore:   ss,
+		labels:        ls,
+		labelSets:     lss,
 		postingsStore: ps,
 		timelineStore: ts,
 	}
@@ -87,33 +83,14 @@ const seperator = byte('\xff')
 
 // Constructors for registered stores.
 var (
-	seriesStores   = map[string]func(path string) (seriesStore, error){}
 	postingsStores = map[string]func(path string) (postingsStore, error){}
 	timelineStores = map[string]func(path string) (timelineStore, error){}
 )
-
-// A seriesStore can start a read or write seriesTx.
-type seriesStore interface {
-	Begin(writeable bool) (seriesTx, error)
-	Close() error
-}
 
 // Tx is a generic interface for transactions.
 type Tx interface {
 	Commit() error
 	Rollback() error
-}
-
-// seriesStore stores series descriptors under unique and montonically increasing IDs.
-type seriesTx interface {
-	Tx
-	// get the series descriptor for the series with the given id.
-	series(id uint64) (map[string]string, error)
-	// ensure stores the series discriptor with a montonically increasing,
-	// unique ID. If the series descriptor was already stored, the ID is returned.
-	ensureSeries(desc map[string]string) (uint64, seriesKey, bool, error)
-	// labels returns label keys of labels for the given matcher.
-	labels(Matcher) ([]uint64, error)
 }
 
 // A postingsStore can start a postingsTx on postings lists.
@@ -152,13 +129,17 @@ type timelineTx interface {
 type index struct {
 	opts *Options
 
-	seriesStore   seriesStore
+	labelSets     LabelSets
+	labels        Labels
 	postingsStore postingsStore
 	timelineStore timelineStore
 }
 
 func (ix *index) Close() error {
-	if err := ix.seriesStore.Close(); err != nil {
+	if err := ix.labelSets.Close(); err != nil {
+		return err
+	}
+	if err := ix.labels.Close(); err != nil {
 		return err
 	}
 	return ix.postingsStore.Close()
@@ -169,48 +150,36 @@ func (ix *index) Sync() error {
 }
 
 // Series implements the Index interface.
-func (ix *index) Series(id uint64) (map[string]string, error) {
-	tx, err := ix.seriesStore.Begin(false)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	return tx.series(id)
+func (ix *index) Sets(id ...uint64) ([]Set, error) {
+	return ix.labelSets.Get(id...)
 }
 
 // Series implements the Index interface.
-func (ix *index) EnsureSeries(labels map[string]string) (sid uint64, err error) {
-	stx, err := ix.seriesStore.Begin(true)
+func (ix *index) EnsureSets(sets ...Set) (ids []uint64, err error) {
+	ids, skeys, err := ix.labelSets.Ensure(sets...)
 	if err != nil {
-		return 0, err
-	}
-	sid, skey, created, err := stx.ensureSeries(labels)
-	if err != nil {
-		stx.Rollback()
-		return 0, err
-	}
-	if !created {
-		stx.Rollback()
-		return sid, nil
-	}
-	if err := stx.Commit(); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	ptx, err := ix.postingsStore.Begin(true)
 	if err != nil {
-		return sid, err
+		return ids, err
 	}
 
-	for _, k := range skey {
-		fmt.Println("append for key", k, sid)
-		if err := ptx.append(k, sid); err != nil {
-			ptx.Rollback()
-			return sid, err
+	for i, id := range ids {
+		if skeys[i] == nil {
+			continue
+		}
+
+		for _, k := range skeys[i] {
+			if err := ptx.append(k, id); err != nil {
+				ptx.Rollback()
+				return ids, err
+			}
 		}
 	}
-	return sid, ptx.Commit()
+
+	return ids, ptx.Commit()
 }
 
 func (ix *index) See(ts time.Time, id uint64) error {
@@ -238,12 +207,6 @@ func (ix *index) Unsee(ts time.Time, id uint64) error {
 }
 
 func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
-	stx, err := ix.seriesStore.Begin(false)
-	if err != nil {
-		return nil, err
-	}
-	defer stx.Rollback()
-
 	ptx, err := ix.postingsStore.Begin(false)
 	if err != nil {
 		return nil, err
@@ -252,19 +215,16 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 
 	var its []iterator
 	for _, m := range ms {
-		ids, err := stx.labels(m)
+		ids, err := ix.labels.Search(m)
 		if err != nil {
 			return nil, err
 		}
-		fmt.Println("get postings for ids", ids)
 		var mits []iterator
 		for _, id := range ids {
 			it, err := ptx.iter(id)
 			if err != nil {
 				return nil, err
 			}
-			fmt.Println("id", id)
-			fmt.Println(expandIterator(it))
 			mits = append(mits, it)
 		}
 		its = append(its, merge(mits...))
@@ -289,12 +249,6 @@ func (ix *index) Instant(ts time.Time, ms ...Matcher) ([]uint64, error) {
 }
 
 func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
-	stx, err := ix.seriesStore.Begin(false)
-	if err != nil {
-		return nil, err
-	}
-	defer stx.Rollback()
-
 	ptx, err := ix.postingsStore.Begin(false)
 	if err != nil {
 		return nil, err
@@ -303,7 +257,7 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 
 	var its []iterator
 	for _, m := range ms {
-		ids, err := stx.labels(m)
+		ids, err := ix.labels.Search(m)
 		if err != nil {
 			return nil, err
 		}
@@ -333,57 +287,3 @@ func (ix *index) Range(start, end time.Time, ms ...Matcher) ([]uint64, error) {
 	res, err := expandIterator(intersect(its...))
 	return res, err
 }
-
-type labelSet map[string]string
-
-func (ls labelSet) m() map[string]string {
-	return map[string]string(ls)
-}
-
-type seriesKey []uint64
-
-func (k seriesKey) Len() int           { return len(k) }
-func (k seriesKey) Swap(i, j int)      { k[i], k[j] = k[j], k[i] }
-func (k seriesKey) Less(i, j int) bool { return k[i] < k[j] }
-
-func (k seriesKey) bytes() []byte {
-	b := make([]byte, len(k)*binary.MaxVarintLen64)
-	n := 0
-	for _, j := range k {
-		n += binary.PutUvarint(b[n:], j)
-	}
-	return b[:n]
-}
-
-// Matcher checks whether a value for a key satisfies a check condition.
-type Matcher interface {
-	Key() string
-	Match(value string) bool
-}
-
-type EqualMatcher struct {
-	key, val string
-}
-
-func NewEqualMatcher(key, val string) *EqualMatcher {
-	return &EqualMatcher{key: key, val: val}
-}
-
-func (m *EqualMatcher) Key() string         { return m.key }
-func (m *EqualMatcher) Match(s string) bool { return m.val == s }
-
-type RegexpMatcher struct {
-	key string
-	re  *regexp.Regexp
-}
-
-func NewRegexpMatcher(key string, expr string) (*RegexpMatcher, error) {
-	re, err := regexp.Compile(expr)
-	if err != nil {
-		return nil, err
-	}
-	return &RegexpMatcher{key: key, re: re}, nil
-}
-
-func (m *RegexpMatcher) Key() string         { return m.key }
-func (m *RegexpMatcher) Match(s string) bool { return m.re.MatchString(s) }
