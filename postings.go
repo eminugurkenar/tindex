@@ -120,7 +120,6 @@ func (p *postingsStore) Append(batches PostingsBatches) error {
 			return fmt.Errorf("Bucket %q missing", bucketPostings)
 		}
 
-		// TODO(fabxc): that could be parallelized?
 		for k, ids := range batches {
 			if err := postingsAppend(sl, ps, k, ids...); err != nil {
 				return err

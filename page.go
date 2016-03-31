@@ -3,6 +3,7 @@ package tindex
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -62,6 +63,7 @@ func (p *pageDeltaCursor) append(id uint64) error {
 		return errPageFull
 	}
 	if p.cur >= id {
+		fmt.Println("outoforder", p.cur, id)
 		return errOutOfOrder
 	}
 	p.pos += binary.PutUvarint(p.data[p.pos:], id-p.cur)
