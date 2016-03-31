@@ -105,7 +105,7 @@ type timelineTx interface {
 type index struct {
 	opts *Options
 
-	labelSets     LabelSets
+	labelSets     Sets
 	labels        Labels
 	postings      Postings
 	timelineStore timelineStore

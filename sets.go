@@ -13,7 +13,7 @@ import (
 type Set map[string]string
 
 // LabelSets stores sets of labels.
-type LabelSets interface {
+type Sets interface {
 	// Ensure that the given label sets are registered in the storage.
 	// Returns the IDs and SetKeys in order of the inserted sets.
 	Ensure(sets ...Set) ([]uint64, []SetKey, error)
@@ -28,7 +28,7 @@ var (
 	bktLabelSetIDs = []byte("label_set_ids")
 )
 
-func NewLabelSets(path string, labels Labels) (LabelSets, error) {
+func NewLabelSets(path string, labels Labels) (Sets, error) {
 	if err := os.MkdirAll(path, 0777); err != nil {
 		return nil, err
 	}
