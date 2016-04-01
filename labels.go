@@ -182,6 +182,7 @@ type Matcher interface {
 	Match(value string) bool
 }
 
+// EqualMatcher matches exactly one value for a particular label.
 type EqualMatcher struct {
 	key, val string
 }
@@ -193,6 +194,8 @@ func NewEqualMatcher(key, val string) *EqualMatcher {
 func (m *EqualMatcher) Key() string         { return m.key }
 func (m *EqualMatcher) Match(s string) bool { return m.val == s }
 
+// RegexpMatcher matches labels for the fixed key for which the value
+// matches a regular expression.
 type RegexpMatcher struct {
 	key string
 	re  *regexp.Regexp

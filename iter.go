@@ -5,6 +5,7 @@ import (
 	"sort"
 )
 
+// An Iterator provides sorted iteration over a list of uint64s.
 type Iterator interface {
 	// next retrieves the next document ID in the postings list.
 	Next() (uint64, error)
@@ -72,6 +73,7 @@ func (it *mergeIterator) Seek(id uint64) (uint64, error) {
 	return it.Next()
 }
 
+// Merge returns a new Iterator over the union of the input iterators.
 func Merge(its ...Iterator) Iterator {
 	if len(its) == 0 {
 		return nil
@@ -84,6 +86,8 @@ func Merge(its ...Iterator) Iterator {
 	return i1
 }
 
+// ExpandIterator walks through the iterator and returns the result list.
+// The iterator is closed after completion.
 func ExpandIterator(it Iterator) ([]uint64, error) {
 	var (
 		res = []uint64{}
@@ -114,6 +118,7 @@ func (it *intersectIterator) Close() error {
 	return it.i2.Close()
 }
 
+// Intersect returns a new Iterator over the intersection of the input iterators.
 func Intersect(its ...Iterator) Iterator {
 	if len(its) == 0 {
 		return nil

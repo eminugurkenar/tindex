@@ -10,9 +10,10 @@ import (
 	"github.com/boltdb/bolt"
 )
 
+// A set of labels with unique label names.
 type Set map[string]string
 
-// LabelSets stores sets of labels.
+// Sets stores sets of labels.
 type Sets interface {
 	// Ensure that the given label sets are registered in the storage.
 	// Returns the IDs and SetKeys in order of the inserted sets.
@@ -28,6 +29,7 @@ var (
 	bktLabelSetIDs = []byte("label_set_ids")
 )
 
+// NewLabelsSets returns a new Sets store based on BoltDB and the given Labels store.
 func NewLabelSets(path string, labels Labels) (Sets, error) {
 	if err := os.MkdirAll(path, 0777); err != nil {
 		return nil, err
@@ -173,6 +175,7 @@ func (s *labelSetsStore) Close() error {
 	return s.db.Close()
 }
 
+// SetKey is a list of label IDs that uniquely identify a Set if sorted.
 type SetKey []uint64
 
 func newSetKey(b []byte) ([]uint64, error) {

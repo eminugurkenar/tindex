@@ -12,31 +12,41 @@ var (
 	errNotFound   = errors.New("not found")
 )
 
+// An index for sets of labels that allows efficient searching through all
+// combinations of label dimensions.
+// Sets can be marked as active or inactive over time and queried based
+// on their exitance over time.
 type Index interface {
+	// Sets returns the list of sets associated with the input IDs in order.
 	Sets(id ...uint64) ([]Set, error)
+	// EnsureSets retrieves the IDs for the input sets. If a set was never
+	// seen before it will be created with a new unique ID.
 	EnsureSets(ls ...Set) ([]uint64, error)
 
-	Active(ts time.Time, id ...uint64) error
-	Inactive(ts time.Time, id ...uint64) error
+	// Mark the sets associated with the IDs as active at time ts.
+	Active(ts time.Time, ids ...uint64) error
+	// Mark the sets associated with the IDs as inactive at time ts.
+	Inactive(ts time.Time, ids ...uint64) error
 
+	// Instant returns an iterator over set IDs matching the given matchers
+	// and that are marked as active for timestamp.
 	Instant(time.Time, ...Matcher) (Iterator, error)
+	// Range returns an iterator over set IDs matching the given matchers
+	// and that are marked as active for the range.
+	// The range starts at the timestamp and ends at the timstamp plus the duration.
 	Range(time.Time, time.Duration, ...Matcher) (Iterator, error)
 
+	// Close the index.
 	Close() error
 }
 
+// Options for an Index.
 type Options struct {
-	SeriesStore   string
-	PostingsStore string
-	TimelineStore string
 }
 
-var DefaultOptions = &Options{
-	SeriesStore:   "bolt",
-	PostingsStore: "bolt",
-	TimelineStore: "bolt",
-}
+var DefaultOptions = &Options{}
 
+// Open a new Index under path.
 func Open(path string, opts *Options) (Index, error) {
 	// Use default options if none are provided.
 	if opts == nil {
