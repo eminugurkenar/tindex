@@ -13,14 +13,14 @@ var (
 )
 
 type Index interface {
-	Instant(at time.Time, ms ...Matcher) (Iterator, error)
-	Range(from, to time.Time, ms ...Matcher) (Iterator, error)
-
 	Sets(id ...uint64) ([]Set, error)
 	EnsureSets(ls ...Set) ([]uint64, error)
 
-	See(ts time.Time, id uint64) error
-	Unsee(ts time.Time, id uint64) error
+	Active(ts time.Time, id ...uint64) error
+	Inactive(ts time.Time, id ...uint64) error
+
+	Instant(time.Time, ...Matcher) (Iterator, error)
+	Range(time.Time, time.Duration, ...Matcher) (Iterator, error)
 
 	Close() error
 }
@@ -43,15 +43,6 @@ func Open(path string, opts *Options) (Index, error) {
 		opts = DefaultOptions
 	}
 
-	createTimelineStore, ok := timelineStores[opts.TimelineStore]
-	if !ok {
-		return nil, fmt.Errorf("unknown timeline store %q", opts.TimelineStore)
-	}
-
-	ts, err := createTimelineStore(filepath.Join(path, "timeline", opts.TimelineStore))
-	if err != nil {
-		return nil, err
-	}
 	ls, err := NewLabels(filepath.Join(path, "labels"))
 	if err != nil {
 		return nil, err
@@ -65,50 +56,32 @@ func Open(path string, opts *Options) (Index, error) {
 		return nil, err
 	}
 
+	tps, err := NewPostings(filepath.Join(path, "timeline"))
+	if err != nil {
+		return nil, err
+	}
+	tl, err := NewTimeline(filepath.Join(path, "timeline"), tps)
+	if err != nil {
+		return nil, err
+	}
+
 	ix := &index{
-		labels:        ls,
-		labelSets:     lss,
-		postings:      ps,
-		timelineStore: ts,
+		labels:    ls,
+		labelSets: lss,
+		postings:  ps,
+		timeline:  tl,
 	}
 	return ix, nil
-}
-
-// Constructors for registered stores.
-var (
-	timelineStores = map[string]func(path string) (timelineStore, error){}
-)
-
-// Tx is a generic interface for transactions.
-type Tx interface {
-	Commit() error
-	Rollback() error
-}
-
-type timelineStore interface {
-	Begin(writable bool) (timelineTx, error)
-	Close() error
-}
-
-type timelineTx interface {
-	Tx
-	// Returns an iterator of document IDs that were valid at the given time.
-	Instant(t time.Time) (Iterator, error)
-	// Returns an iterator of document IDs that were valid at some point
-	// during the given range.
-	Range(start, end time.Time) (Iterator, error)
-
-	SetDiff(t time.Time, s diffState, ids ...uint64) error
 }
 
 // index implements the Index interface.
 type index struct {
 	opts *Options
 
-	labelSets     Sets
-	labels        Labels
-	postings      Postings
-	timelineStore timelineStore
+	labelSets Sets
+	labels    Labels
+	postings  Postings
+	timeline  Timeline
 }
 
 func (ix *index) Close() error {
@@ -145,37 +118,20 @@ func (ix *index) EnsureSets(sets ...Set) (ids []uint64, err error) {
 		if skeys[i] == nil {
 			continue
 		}
-		if _, ok := batches[id]; ok {
-			return nil, fmt.Errorf("Batch for ID %q already exists", id)
+		for _, k := range skeys[i] {
+			batches[k] = append(batches[k], id)
 		}
-		batches[id] = append(batches[id], id)
 	}
 
 	return ids, ix.postings.Append(batches)
 }
 
-func (ix *index) See(ts time.Time, id uint64) error {
-	tx, err := ix.timelineStore.Begin(true)
-	if err != nil {
-		return err
-	}
-	if err := tx.SetDiff(ts, diffStateAdd, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+func (ix *index) Active(ts time.Time, ids ...uint64) error {
+	return ix.timeline.Active(ts, ids...)
 }
 
-func (ix *index) Unsee(ts time.Time, id uint64) error {
-	tx, err := ix.timelineStore.Begin(true)
-	if err != nil {
-		return err
-	}
-	if err := tx.SetDiff(ts, diffStateDel, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+func (ix *index) Inactive(ts time.Time, ids ...uint64) error {
+	return ix.timeline.Inactive(ts, ids...)
 }
 
 func (ix *index) matchIter(matchers ...Matcher) (Iterator, error) {
@@ -207,33 +163,26 @@ func (ix *index) matchIter(matchers ...Matcher) (Iterator, error) {
 func (ix *index) Instant(ts time.Time, ms ...Matcher) (Iterator, error) {
 	mit, err := ix.matchIter(ms...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting matchers failed: %s", err)
 	}
-
-	ttx, err := ix.timelineStore.Begin(false)
+	tlit, err := ix.timeline.Instant(ts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting timeline iterator failed: %s", err)
 	}
-	defer ttx.Rollback()
 
-	it, err := ttx.Instant(ts)
-
-	return Intersect(mit, it), err
+	return Intersect(mit, tlit), nil
 }
 
-func (ix *index) Range(start, end time.Time, ms ...Matcher) (Iterator, error) {
+func (ix *index) Range(ts time.Time, dur time.Duration, ms ...Matcher) (Iterator, error) {
 	mit, err := ix.matchIter(ms...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting matchers failed: %s", err)
 	}
 
-	ttx, err := ix.timelineStore.Begin(false)
+	tlit, err := ix.timeline.Range(ts, dur)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting timeline iterator failed: %s", err)
 	}
-	defer ttx.Rollback()
 
-	it, err := ttx.Range(start, end)
-
-	return Intersect(mit, it), err
+	return Intersect(tlit, mit), nil
 }

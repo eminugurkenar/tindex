@@ -94,7 +94,9 @@ func ExpandIterator(it Iterator) ([]uint64, error) {
 		res = append(res, v)
 	}
 	if err == io.EOF {
-		err = nil
+		err = it.Close()
+	} else {
+		it.Close()
 	}
 	return res, err
 }

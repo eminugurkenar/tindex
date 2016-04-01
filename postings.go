@@ -100,9 +100,7 @@ func (p *postingsStore) Iter(k uint64) (Iterator, error) {
 			// and are always delta encoded.
 			return newPageDelta(data).cursor(), nil
 		}),
-		close: func() error {
-			return tx.Rollback()
-		},
+		close: tx.Rollback,
 	}
 
 	return it, nil
@@ -210,6 +208,12 @@ func postingsAppend(skiplist, postings *bolt.Bucket, key uint64, ids ...uint64) 
 
 	// Save the last page we have written to.
 	return postings.Put(encodeUint64(pid), pg.data())
+}
+
+type iteratorStoreFunc func(k uint64) (Iterator, error)
+
+func (s iteratorStoreFunc) get(k uint64) (Iterator, error) {
+	return s(k)
 }
 
 // boltSkiplistCursor implements the skiplistCurosr interface.
