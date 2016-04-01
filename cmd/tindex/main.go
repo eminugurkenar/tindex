@@ -8,8 +8,10 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"runtime"
+	"runtime/pprof"
 	"strings"
-	// "time"
+	"time"
 
 	"github.com/fabxc/tindex"
 )
@@ -85,6 +87,10 @@ type benchOptions struct {
 	setsMaxLabels int
 
 	setsBatchSize int
+
+	CPUProfile   string
+	MemProfile   string
+	BlockProfile string
 }
 
 func (cmd *benchCmd) usage() string {
@@ -106,11 +112,17 @@ func (cmd *benchCmd) run(args ...string) error {
 	fs.IntVar(&opts.setsMaxLabels, "sets.max-labels", 12, "max number of labels per set")
 	fs.IntVar(&opts.setsBatchSize, "sets.batch-size", 5000, "batch size for writing new sets")
 
+	fs.StringVar(&opts.CPUProfile, "cpuprofile", "", "")
+	fs.StringVar(&opts.MemProfile, "memprofile", "", "")
+	fs.StringVar(&opts.BlockProfile, "blockprofile", "", "")
+
 	cmd.fs = fs
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	fmt.Println(">> generating test data")
 
 	lbls := opts.genLabels()
 	sets := opts.genSets(lbls)
@@ -125,8 +137,9 @@ func (cmd *benchCmd) run(args ...string) error {
 		return err
 	}
 
-	fmt.Println("inserting sets:", len(sets))
-	fmt.Println("num labels:", len(lbls))
+	fmt.Println(">> starting writes")
+	start := time.Now()
+	cmd.startProfiling(opts)
 
 	remSets := sets[:]
 	for len(remSets) > 0 {
@@ -142,7 +155,71 @@ func (cmd *benchCmd) run(args ...string) error {
 
 		remSets = remSets[n:]
 	}
+
+	cmd.stopProfiling()
+	fmt.Println(" > completed in", time.Since(start))
+
 	return nil
+}
+
+// Starts all profiles set on the opts.
+func (cmd *benchCmd) startProfiling(opts *benchOptions) {
+	var err error
+
+	// Start CPU profiling.
+	if opts.CPUProfile != "" {
+		cpuprofile, err = os.Create(opts.CPUProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bench: could not create cpu profile %q: %v\n", opts.CPUProfile, err)
+			os.Exit(1)
+		}
+		pprof.StartCPUProfile(cpuprofile)
+	}
+
+	// Start memory profiling.
+	if opts.MemProfile != "" {
+		memprofile, err = os.Create(opts.MemProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bench: could not create memory profile %q: %v\n", opts.MemProfile, err)
+			os.Exit(1)
+		}
+		runtime.MemProfileRate = 4096
+	}
+
+	// Start fatal profiling.
+	if opts.BlockProfile != "" {
+		blockprofile, err = os.Create(opts.BlockProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bench: could not create block profile %q: %v\n", opts.BlockProfile, err)
+			os.Exit(1)
+		}
+		runtime.SetBlockProfileRate(1)
+	}
+}
+
+// File handlers for the various profiles.
+var cpuprofile, memprofile, blockprofile *os.File
+
+// Stops all profiles.
+func (cmd *benchCmd) stopProfiling() {
+	if cpuprofile != nil {
+		pprof.StopCPUProfile()
+		cpuprofile.Close()
+		cpuprofile = nil
+	}
+
+	if memprofile != nil {
+		pprof.Lookup("heap").WriteTo(memprofile, 0)
+		memprofile.Close()
+		memprofile = nil
+	}
+
+	if blockprofile != nil {
+		pprof.Lookup("block").WriteTo(blockprofile, 0)
+		blockprofile.Close()
+		blockprofile = nil
+		runtime.SetBlockProfileRate(0)
+	}
 }
 
 type labels map[string][]string
