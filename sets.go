@@ -163,7 +163,7 @@ func (s *labelSetsStore) Get(ids ...uint64) ([]Set, error) {
 
 		for i := 0; i < l; i++ {
 			p := pairs[i]
-			lset[p.key] = p.val
+			lset[p.Key] = p.Val
 		}
 		pairs = pairs[l:]
 	}

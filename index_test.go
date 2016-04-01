@@ -1,7 +1,6 @@
 package tindex
 
 import (
-	"fmt"
 	"io/ioutil"
 	"reflect"
 	"testing"
@@ -188,7 +187,6 @@ func TestIndexRange2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println(dir)
 	ix, err := Open(dir, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +231,6 @@ func TestIndexRange2(t *testing.T) {
 	timeAt := func(i uint64) time.Time {
 		return t0.Add(time.Duration(i) * time.Hour)
 	}
-	var sids []uint64
 
 	for _, d := range data {
 		sids, err := ix.EnsureSets(d.m)
@@ -255,6 +252,8 @@ func TestIndexRange2(t *testing.T) {
 			}
 		}
 	}
+
+	sids := []uint64{1, 2, 3}
 
 	it, err := ix.Instant(timeAt(5), NewEqualMatcher("l2", "v2"))
 	if err != nil {

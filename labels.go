@@ -17,7 +17,7 @@ var (
 )
 
 type Pair struct {
-	key, val string
+	Key, Val string
 }
 
 // Labels stores and retrieves batches of label pairs and assigns them unique IDs.
@@ -85,11 +85,11 @@ func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 		for _, pair := range pairs {
 			var id uint64
 
-			k := make([]byte, len(pair.key)+len(pair.val)+1)
+			k := make([]byte, len(pair.Key)+len(pair.Val)+1)
 
-			copy(k[:len(pair.key)], []byte(pair.key))
-			k[len(pair.key)] = separator
-			copy(k[len(pair.key)+1:], []byte(pair.val))
+			copy(k[:len(pair.Key)], []byte(pair.Key))
+			k[len(pair.Key)] = separator
+			copy(k[len(pair.Key)+1:], []byte(pair.Val))
 
 			if idb := blabels.Get(k); idb == nil {
 				id, err = bids.NextSequence()
@@ -142,8 +142,8 @@ func (s *labelsStore) Get(ids ...uint64) (pairs []Pair, err error) {
 		p := bytes.Split(label, []byte{separator})
 
 		pairs = append(pairs, Pair{
-			key: string(p[0]),
-			val: string(p[1]),
+			Key: string(p[0]),
+			Val: string(p[1]),
 		})
 
 	}
