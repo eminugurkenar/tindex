@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/fabxc/tindex"
-	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/storage/local"
 )
 
 var errUsage = errors.New("usage error")
@@ -62,6 +60,8 @@ func Main(args ...string) error {
 	switch args[0] {
 	case "bench-write":
 		cmd = &benchWriteCmd{}
+	case "bench-read":
+		cmd = &benchReadCmd{}
 	default:
 		return errUsage
 	}
@@ -71,6 +71,23 @@ func Main(args ...string) error {
 		fmt.Fprintln(os.Stderr, cmd.usage())
 	}
 	return err
+}
+
+type benchReadCmd struct {
+	fs *flag.FlagSet
+}
+
+func (cmd *benchReadCmd) usage() string {
+	cmd.fs.Usage()
+	return ""
+}
+
+type benchReadOptions struct {
+}
+
+func (cmd *benchReadCmd) run(args ...string) error {
+	// fs := flag.NewFlagSet("", flag.ContinueOnError)
+	return nil
 }
 
 type benchWriteCmd struct {
@@ -134,26 +151,16 @@ func (cmd *benchWriteCmd) run(args ...string) error {
 		return err
 	}
 
-	storage := local.NewMemorySeriesStorage(&local.MemorySeriesStorageOptions{
-		MemoryChunks:               550000,
-		MaxChunksToPersist:         550000,
-		PersistenceStoragePath:     dir,
-		PersistenceRetentionPeriod: time.Hour,
-		CheckpointInterval:         time.Hour,
-		CheckpointDirtySeriesLimit: 600000,
-		SyncStrategy:               local.Adaptive,
-		MinShrinkRatio:             0.1,
-	})
-	// ix, err := tindex.Open(dir, nil)
-	// if err != nil {
-	// 	return err
-	// }
+	ix, err := tindex.Open(dir, nil)
+	if err != nil {
+		return err
+	}
 
-	fmt.Println(">> starting writes")
+	fmt.Println(">> writing sets")
 	start := time.Now()
 	cmd.startProfiling(opts)
 
-	// storage.
+	var ids []uint64
 
 	remSets := sets[:]
 	for len(remSets) > 0 {
@@ -162,28 +169,63 @@ func (cmd *benchWriteCmd) run(args ...string) error {
 			n = len(remSets)
 		}
 
-		for _, s := range sets {
-			met := make(model.Metric, len(s))
-			for k, v := range s {
-				met[model.LabelName(k)] = model.LabelValue(v)
-			}
-			storage.Append(&model.Sample{
-				Metric:    met,
-				Timestamp: 1,
-				Value:     0,
-			})
+		is, err := ix.EnsureSets(remSets[:n]...)
+		if err != nil {
+			return err
 		}
-		// _, err := ix.EnsureSets(remSets[:n]...)
-		// if err != nil {
-		// 	return err
-		// }
+		ids = append(ids, is...)
 
 		remSets = remSets[n:]
 	}
-	storage.WaitForIndexing()
+
+	fmt.Println(" > completed in", time.Since(start))
+
+	fmt.Println(">> setting initial active")
+	start = time.Now()
+
+	if err := ix.Active(start, ids...); err != nil {
+		return err
+	}
+
+	fmt.Println(" > completed in", time.Since(start))
+
+	fmt.Println(">> setting active/inactive")
+	start = time.Now()
+
+	var tdelta time.Duration
+
+	var lenTotal int
+	for i := 0; i < 50; i++ {
+		first := rand.Intn(len(ids))
+		last := first + randNormInt(4000, 1000, 10, len(ids)-first)
+		lenTotal += last - first
+
+		tdelta += time.Duration(rand.Intn(100)) * time.Hour
+
+		if i%2 == 0 {
+			if err := ix.Active(start.Add(tdelta), ids[first:last]...); err != nil {
+				return err
+			}
+		} else {
+			if err := ix.Inactive(start.Add(tdelta), ids[first:last]...); err != nil {
+				return err
+			}
+		}
+	}
+
+	fmt.Println(" > completed in", time.Since(start))
+	fmt.Println(" > average length", lenTotal/50)
+
+	fmt.Println(">> setting final inactive")
+	start = time.Now()
+
+	if err := ix.Inactive(start, ids...); err != nil {
+		return err
+	}
+
+	fmt.Println(" > completed in", time.Since(start))
 
 	cmd.stopProfiling()
-	fmt.Println(" > completed in", time.Since(start))
 
 	return nil
 }
@@ -322,7 +364,7 @@ func (opts *benchWriteOptions) randNumLabels() int {
 }
 
 func (opts *benchWriteOptions) randName() string {
-	return randString(randNormInt(7, 2, 3, 18))
+	return randString(randNormInt(6, 3, 3, 18))
 }
 
 func (opts *benchWriteOptions) randValue() string {
@@ -330,7 +372,7 @@ func (opts *benchWriteOptions) randValue() string {
 }
 
 func randNormInt(mean, stddev, min, max int) int {
-	v := rand.NormFloat64() * float64(mean) * float64(stddev)
+	v := rand.NormFloat64()*float64(stddev) + float64(mean)
 	v = math.Min(v, float64(max))
 	v = math.Max(v, float64(min))
 	return int(v)
