@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/fabxc/tindex"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/storage/local"
 )
 
 var errUsage = errors.New("usage error")
@@ -59,7 +61,7 @@ func Main(args ...string) error {
 
 	switch args[0] {
 	case "bench-write":
-		cmd = &benchCmd{}
+		cmd = &benchWriteCmd{}
 	default:
 		return errUsage
 	}
@@ -71,11 +73,11 @@ func Main(args ...string) error {
 	return err
 }
 
-type benchCmd struct {
+type benchWriteCmd struct {
 	fs *flag.FlagSet
 }
 
-type benchOptions struct {
+type benchWriteOptions struct {
 	labelsTotal     int
 	labelsAvgValues int
 	labelsMinValues int
@@ -93,14 +95,14 @@ type benchOptions struct {
 	BlockProfile string
 }
 
-func (cmd *benchCmd) usage() string {
+func (cmd *benchWriteCmd) usage() string {
 	cmd.fs.Usage()
 	return ""
 }
 
-func (cmd *benchCmd) run(args ...string) error {
+func (cmd *benchWriteCmd) run(args ...string) error {
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	opts := &benchOptions{}
+	opts := &benchWriteOptions{}
 
 	fs.IntVar(&opts.labelsTotal, "labels.total", 3000, "total number of distinct key/value labels")
 	fs.IntVar(&opts.labelsAvgValues, "labels.avg-values", 10, "avg number of values per label key")
@@ -132,14 +134,26 @@ func (cmd *benchCmd) run(args ...string) error {
 		return err
 	}
 
-	ix, err := tindex.Open(dir, nil)
-	if err != nil {
-		return err
-	}
+	storage := local.NewMemorySeriesStorage(&local.MemorySeriesStorageOptions{
+		MemoryChunks:               550000,
+		MaxChunksToPersist:         550000,
+		PersistenceStoragePath:     dir,
+		PersistenceRetentionPeriod: time.Hour,
+		CheckpointInterval:         time.Hour,
+		CheckpointDirtySeriesLimit: 600000,
+		SyncStrategy:               local.Adaptive,
+		MinShrinkRatio:             0.1,
+	})
+	// ix, err := tindex.Open(dir, nil)
+	// if err != nil {
+	// 	return err
+	// }
 
 	fmt.Println(">> starting writes")
 	start := time.Now()
 	cmd.startProfiling(opts)
+
+	// storage.
 
 	remSets := sets[:]
 	for len(remSets) > 0 {
@@ -148,13 +162,25 @@ func (cmd *benchCmd) run(args ...string) error {
 			n = len(remSets)
 		}
 
-		_, err := ix.EnsureSets(remSets[:n]...)
-		if err != nil {
-			return err
+		for _, s := range sets {
+			met := make(model.Metric, len(s))
+			for k, v := range s {
+				met[model.LabelName(k)] = model.LabelValue(v)
+			}
+			storage.Append(&model.Sample{
+				Metric:    met,
+				Timestamp: 1,
+				Value:     0,
+			})
 		}
+		// _, err := ix.EnsureSets(remSets[:n]...)
+		// if err != nil {
+		// 	return err
+		// }
 
 		remSets = remSets[n:]
 	}
+	storage.WaitForIndexing()
 
 	cmd.stopProfiling()
 	fmt.Println(" > completed in", time.Since(start))
@@ -163,7 +189,7 @@ func (cmd *benchCmd) run(args ...string) error {
 }
 
 // Starts all profiles set on the opts.
-func (cmd *benchCmd) startProfiling(opts *benchOptions) {
+func (cmd *benchWriteCmd) startProfiling(opts *benchWriteOptions) {
 	var err error
 
 	// Start CPU profiling.
@@ -201,7 +227,7 @@ func (cmd *benchCmd) startProfiling(opts *benchOptions) {
 var cpuprofile, memprofile, blockprofile *os.File
 
 // Stops all profiles.
-func (cmd *benchCmd) stopProfiling() {
+func (cmd *benchWriteCmd) stopProfiling() {
 	if cpuprofile != nil {
 		pprof.StopCPUProfile()
 		cpuprofile.Close()
@@ -224,7 +250,7 @@ func (cmd *benchCmd) stopProfiling() {
 
 type labels map[string][]string
 
-func (opts *benchOptions) genLabels() labels {
+func (opts *benchWriteOptions) genLabels() labels {
 	res := labels{}
 	i := 0
 
@@ -241,7 +267,7 @@ func (opts *benchOptions) genLabels() labels {
 	return res
 }
 
-func (opts *benchOptions) genSets(lbls labels) []tindex.Set {
+func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Set {
 	res := []tindex.Set{}
 
 	lnames := []string{}
@@ -267,6 +293,7 @@ func (opts *benchOptions) genSets(lbls labels) []tindex.Set {
 			instances[i/opts.setsBatchSize] = randString(16)
 		}
 
+		// Typically we one fixed label across all batches and one per batch.
 		s["instance"] = instances[i/opts.setsBatchSize]
 		s["job"] = "node"
 
@@ -276,7 +303,7 @@ func (opts *benchOptions) genSets(lbls labels) []tindex.Set {
 	return res
 }
 
-func (opts *benchOptions) randNumValues() int {
+func (opts *benchWriteOptions) randNumValues() int {
 	return randNormInt(
 		opts.labelsAvgValues,
 		(opts.labelsMaxValues-opts.labelsMinValues)*2,
@@ -285,7 +312,7 @@ func (opts *benchOptions) randNumValues() int {
 	)
 }
 
-func (opts *benchOptions) randNumLabels() int {
+func (opts *benchWriteOptions) randNumLabels() int {
 	return randNormInt(
 		opts.setsAvgLabels,
 		(opts.setsMaxLabels-opts.setsMinLabels)*2,
@@ -294,11 +321,11 @@ func (opts *benchOptions) randNumLabels() int {
 	)
 }
 
-func (opts *benchOptions) randName() string {
+func (opts *benchWriteOptions) randName() string {
 	return randString(randNormInt(7, 2, 3, 18))
 }
 
-func (opts *benchOptions) randValue() string {
+func (opts *benchWriteOptions) randValue() string {
 	return randString(randNormInt(8, 3, 3, 64))
 }
 
