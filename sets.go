@@ -60,12 +60,13 @@ type labelSetsStore struct {
 }
 
 func (s *labelSetsStore) Ensure(sets ...Set) ([]uint64, []SetKey, error) {
-	var all []Pair
+	var all Pairs
 	for _, set := range sets {
 		for k, v := range set {
 			all = append(all, Pair{k, v})
 		}
 	}
+
 	lids, err := s.labels.Ensure(all...)
 	if err != nil {
 		return nil, nil, err

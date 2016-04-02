@@ -102,14 +102,14 @@ func (cmd *benchCmd) run(args ...string) error {
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	opts := &benchOptions{}
 
-	fs.IntVar(&opts.labelsTotal, "labels.total", 4000, "total number of distinct key/value labels")
+	fs.IntVar(&opts.labelsTotal, "labels.total", 3000, "total number of distinct key/value labels")
 	fs.IntVar(&opts.labelsAvgValues, "labels.avg-values", 10, "avg number of values per label key")
 	fs.IntVar(&opts.labelsMinValues, "labels.min-values", 10, "minimum values per label key")
 	fs.IntVar(&opts.labelsMaxValues, "labels.max-values", 1000, "maximum values per label key")
 	fs.IntVar(&opts.setsTotal, "sets.total", 1000000, "total number of sets")
-	fs.IntVar(&opts.setsAvgLabels, "sets.avg-labels", 6, "min number of labels per set")
-	fs.IntVar(&opts.setsMinLabels, "sets.min-labels", 3, "min number of labels per set")
-	fs.IntVar(&opts.setsMaxLabels, "sets.max-labels", 12, "max number of labels per set")
+	fs.IntVar(&opts.setsAvgLabels, "sets.avg-labels", 3, "min number of labels per set")
+	fs.IntVar(&opts.setsMinLabels, "sets.min-labels", 1, "min number of labels per set")
+	fs.IntVar(&opts.setsMaxLabels, "sets.max-labels", 8, "max number of labels per set")
 	fs.IntVar(&opts.setsBatchSize, "sets.batch-size", 5000, "batch size for writing new sets")
 
 	fs.StringVar(&opts.CPUProfile, "cpuprofile", "", "")
@@ -230,11 +230,12 @@ func (opts *benchOptions) genLabels() labels {
 
 	for i < opts.labelsTotal {
 		var vals []string
-		for j := 0; j < opts.randNumValues() && i < opts.labelsTotal; j++ {
+		nvals := opts.randNumValues()
+		for j := 0; j < nvals && i < opts.labelsTotal; j++ {
 			vals = append(vals, opts.randValue())
+			i++
 		}
 		res[opts.randName()] = vals
-		i++
 	}
 
 	return res
@@ -248,18 +249,27 @@ func (opts *benchOptions) genSets(lbls labels) []tindex.Set {
 		lnames = append(lnames, ln)
 	}
 
+	instances := map[int]string{}
+
 	for i := 0; i < opts.setsTotal; i++ {
 		s := tindex.Set{}
-		for j := 0; j < opts.randNumLabels(); {
-			ln := lnames[rand.Intn(len(lnames))]
+		nl := opts.randNumLabels()
+		nl = int(math.Min(float64(len(lnames)), float64(nl)))
+
+		for _, j := range rand.Perm(len(lnames))[:nl] {
+			ln := lnames[j]
 			lv := lbls[ln][rand.Intn(len(lbls[ln]))]
 
-			if _, ok := s[ln]; ok {
-				continue
-			}
 			s[ln] = lv
-			j++
 		}
+
+		if _, ok := instances[i/opts.setsBatchSize]; !ok {
+			instances[i/opts.setsBatchSize] = randString(16)
+		}
+
+		s["instance"] = instances[i/opts.setsBatchSize]
+		s["job"] = "node"
+
 		res = append(res, s)
 	}
 
@@ -285,11 +295,11 @@ func (opts *benchOptions) randNumLabels() int {
 }
 
 func (opts *benchOptions) randName() string {
-	return randString(randNormInt(8, 10, 3, 18))
+	return randString(randNormInt(7, 2, 3, 18))
 }
 
 func (opts *benchOptions) randValue() string {
-	return randString(randNormInt(8, 20, 3, 64))
+	return randString(randNormInt(8, 3, 3, 64))
 }
 
 func randNormInt(mean, stddev, min, max int) int {

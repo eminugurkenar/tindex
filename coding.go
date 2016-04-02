@@ -36,7 +36,8 @@ func (b *buffers) getZero(l int) []byte {
 }
 
 func (b *buffers) put(buf []byte) {
-	b.pool.Put(buf)
+	// b.pool.Put(buf)
+	return
 }
 
 func (b *buffers) bucketPut(bkt *bolt.Bucket, k, v []byte) error {

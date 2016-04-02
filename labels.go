@@ -20,6 +20,25 @@ type Pair struct {
 	Key, Val string
 }
 
+type Pairs []Pair
+
+func (p Pairs) Len() int      { return len(p) }
+func (p Pairs) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+
+func (p Pairs) Less(i, j int) bool {
+	l1 := len(p[i].Key) + len(p[i].Val)
+	l2 := len(p[j].Key) + len(p[j].Val)
+	if l1 < l2 {
+		return true
+	}
+	if l1 > l2 {
+		return false
+	}
+	s1 := p[i].Key + p[i].Val
+	s2 := p[j].Key + p[j].Val
+	return s1 < s2
+}
+
 // Labels stores and retrieves batches of label pairs and assigns them unique IDs.
 type Labels interface {
 	// Ensure stores the pairs if they were not stored already.
@@ -67,6 +86,12 @@ func (s *labelsStore) Close() error {
 	return s.db.Close()
 }
 
+type byteSlices [][]byte
+
+func (bs byteSlices) Len() int           { return len(bs) }
+func (bs byteSlices) Swap(i, j int)      { bs[i], bs[j] = bs[j], bs[i] }
+func (bs byteSlices) Less(i, j int) bool { return bytes.Compare(bs[i], bs[j]) < 0 }
+
 func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 	txbufs := txbuffs{
 		buffers: &encpool,
@@ -102,7 +127,7 @@ func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 				if err != nil {
 					return err
 				}
-				idb := txbufs.uvarint(id)
+				idb := txbufs.uint64be(id)
 
 				if err := blabels.Put(k, idb); err != nil {
 					return err
@@ -111,7 +136,7 @@ func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 					return err
 				}
 			} else {
-				id, _ = binary.Uvarint(idb)
+				id = binary.BigEndian.Uint64(idb)
 			}
 
 			ids = append(ids, id)
@@ -136,8 +161,8 @@ func (s *labelsStore) Get(ids ...uint64) (pairs []Pair, err error) {
 
 	pairs = make([]Pair, 0, len(ids))
 	for _, id := range ids {
-		idb := make([]byte, binary.MaxVarintLen64)
-		idb = idb[:binary.PutUvarint(idb, id)]
+		idb := make([]byte, 8)
+		binary.BigEndian.PutUint64(idb, id)
 
 		label := bids.Get(idb)
 		if label == nil {
@@ -173,8 +198,7 @@ func (s *labelsStore) Search(m Matcher) (ids []uint64, err error) {
 		if !m.Match(string(p[1])) {
 			continue
 		}
-		id, _ := binary.Uvarint(idb)
-		ids = append(ids, id)
+		ids = append(ids, binary.BigEndian.Uint64(idb))
 	}
 
 	return ids, nil
