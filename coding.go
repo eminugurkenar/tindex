@@ -5,7 +5,121 @@ import (
 	"errors"
 	"io"
 	"sync"
+
+	"github.com/boltdb/bolt"
 )
+
+var encpool buffers
+
+type buffers struct {
+	pool sync.Pool
+}
+
+func (b *buffers) get(l int) []byte {
+	x := b.pool.Get()
+	if x == nil {
+		return make([]byte, l)
+	}
+	buf := x.([]byte)
+	if cap(buf) < l {
+		return make([]byte, l)
+	}
+	return buf[:l]
+}
+
+func (b *buffers) getZero(l int) []byte {
+	buf := b.get(l)
+	for i := range buf {
+		buf[i] = 0
+	}
+	return buf
+}
+
+func (b *buffers) put(buf []byte) {
+	b.pool.Put(buf)
+}
+
+func (b *buffers) bucketPut(bkt *bolt.Bucket, k, v []byte) error {
+	err := bkt.Put(k, v)
+	b.put(k)
+	return err
+}
+
+func (b *buffers) bucketGet(bkt *bolt.Bucket, k []byte) []byte {
+	v := bkt.Get(k)
+	b.put(k)
+	return v
+}
+
+func (b *buffers) uint64be(x uint64) []byte {
+	buf := b.get(8)
+	binary.BigEndian.PutUint64(buf, x)
+	return buf
+}
+
+func (b *buffers) uvarint(x uint64) []byte {
+	buf := b.get(binary.MaxVarintLen64)
+	return buf[:binary.PutUvarint(buf, x)]
+}
+
+type txbuffs struct {
+	buffers *buffers
+	done    [][]byte
+}
+
+func (b *txbuffs) get(l int) []byte {
+	buf := b.buffers.get(l)
+	b.done = append(b.done, buf)
+	return buf
+}
+
+func (b *txbuffs) getZero(l int) []byte {
+	buf := b.buffers.getZero(l)
+	b.done = append(b.done, buf)
+	return buf
+}
+
+func (b *txbuffs) release() {
+	for _, buf := range b.done {
+		b.buffers.put(buf)
+	}
+}
+
+func (b *txbuffs) put(buf []byte) {
+	b.done = append(b.done, buf)
+}
+
+func (b *txbuffs) uint64be(x uint64) []byte {
+	buf := b.get(8)
+	binary.BigEndian.PutUint64(buf, x)
+	return buf
+}
+
+func (b *txbuffs) uvarint(x uint64) []byte {
+	buf := b.get(binary.MaxVarintLen64)
+	return buf[:binary.PutUvarint(buf, x)]
+}
+
+// reuse of buffers
+var pagePool sync.Pool
+
+// getBuf returns a buffer from the pool. The length of the returned slice is l.
+func getPage(l int) []byte {
+	x := pagePool.Get()
+	if x == nil {
+		return make([]byte, l)
+	}
+	buf := x.([]byte)
+	if cap(buf) < l {
+		return make([]byte, l)
+	}
+	return buf[:l]
+}
+
+// putBuf returns a buffer to the pool.
+func putPage(buf []byte) {
+	pagePool.Put(buf)
+}
 
 // bufPool is a pool for staging buffers. Using a pool allows concurrency-safe
 // reuse of buffers

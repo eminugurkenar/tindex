@@ -68,6 +68,11 @@ func (s *labelsStore) Close() error {
 }
 
 func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
+	txbufs := txbuffs{
+		buffers: &encpool,
+	}
+	defer txbufs.release()
+
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		var (
 			blabels = tx.Bucket(bktLabels)
@@ -85,7 +90,8 @@ func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 		for _, pair := range pairs {
 			var id uint64
 
-			k := make([]byte, len(pair.Key)+len(pair.Val)+1)
+			k := txbufs.get(len(pair.Key) + len(pair.Val) + 1)
+			// k := make([]byte, len(pair.Key)+len(pair.Val)+1)
 
 			copy(k[:len(pair.Key)], []byte(pair.Key))
 			k[len(pair.Key)] = separator
@@ -96,9 +102,7 @@ func (s *labelsStore) Ensure(pairs ...Pair) (ids []uint64, err error) {
 				if err != nil {
 					return err
 				}
-
-				idb = make([]byte, binary.MaxVarintLen64)
-				idb = idb[:binary.PutUvarint(idb, id)]
+				idb := txbufs.uvarint(id)
 
 				if err := blabels.Put(k, idb); err != nil {
 					return err

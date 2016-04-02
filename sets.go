@@ -74,6 +74,11 @@ func (s *labelSetsStore) Ensure(sets ...Set) ([]uint64, []SetKey, error) {
 	ids := make([]uint64, 0, len(sets))
 	sks := make([]SetKey, 0, len(sets))
 
+	txbufs := txbuffs{
+		buffers: &encpool,
+	}
+	defer txbufs.release()
+
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		var (
 			bids   = tx.Bucket(bktLabelSetIDs)
@@ -86,6 +91,7 @@ func (s *labelSetsStore) Ensure(sets ...Set) ([]uint64, []SetKey, error) {
 
 			sort.Sort(sk)
 			skb := sk.bytes()
+			txbufs.put(skb)
 
 			var id uint64
 
@@ -95,9 +101,7 @@ func (s *labelSetsStore) Ensure(sets ...Set) ([]uint64, []SetKey, error) {
 				if err != nil {
 					return err
 				}
-
-				idb = make([]byte, binary.MaxVarintLen64)
-				idb = idb[:binary.PutUvarint(idb, id)]
+				idb := txbufs.uvarint(id)
 
 				if err := blsets.Put(skb, idb); err != nil {
 					return err
@@ -194,8 +198,9 @@ func (k SetKey) Less(i, j int) bool { return k[i] < k[j] }
 
 func (k SetKey) bytes() []byte {
 	var (
-		buf = make([]byte, len(k)*binary.MaxVarintLen64)
-		n   int
+		buf = encpool.get(len(k) * binary.MaxVarintLen64)
+		// buf = make([]byte, len(k)*binary.MaxVarintLen64)
+		n int
 	)
 	for _, x := range k {
 		n += binary.PutUvarint(buf[n:], x)

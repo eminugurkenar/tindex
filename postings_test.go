@@ -37,7 +37,7 @@ func TestPostings(t *testing.T) {
 	}
 	defer postings.Close()
 
-	batches := genBatch(50, 1, 30000)
+	batches := genBatch(50, 1, 10000)
 
 	if err := postings.Append(batches); err != nil {
 		t.Fatalf("Error appending batches: %s", err)
