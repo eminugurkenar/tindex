@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/boltdb/bolt"
+	"github.com/fabxc/pagebuf"
 )
 
 var (
@@ -35,18 +36,26 @@ func NewPostings(path string) (Postings, error) {
 	if err != nil {
 		return nil, err
 	}
+	pb, err := pagebuf.Open(filepath.Join(path, "postings.pb"), 0666, &pagebuf.Options{
+		PageSize: pageSize,
+	})
+	if err != nil {
+		return nil, err
+	}
 	s := &postingsStore{
 		db: db,
+		pb: pb,
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		if _, err = tx.CreateBucketIfNotExists(bucketPostings); err != nil {
-			return err
-		}
+		// if _, err = tx.CreateBucketIfNotExists(bucketPostings); err != nil {
+		// 	return err
+		// }
 		if _, err = tx.CreateBucketIfNotExists(bucketSkiplist); err != nil {
 			return err
 		}
 		return nil
 	})
+
 	return s, err
 }
 
@@ -57,6 +66,7 @@ type PostingsBatches map[uint64][]uint64
 // postingsStore implements the Postings interface based on BoltDB.
 type postingsStore struct {
 	db *bolt.DB
+	pb *pagebuf.DB
 
 	pgpool buffers // pages
 }
@@ -68,19 +78,23 @@ func (p *postingsStore) Close() error {
 
 // Iter implements the Postings interface.
 func (p *postingsStore) Iter(k uint64) (Iterator, error) {
-	tx, err := p.db.Begin(false)
+	boltTx, err := p.db.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	pagebufTx, err := p.pb.Begin(false)
 	if err != nil {
 		return nil, err
 	}
 
-	skiplist := tx.Bucket(bucketSkiplist)
+	skiplist := boltTx.Bucket(bucketSkiplist)
 	if skiplist == nil {
 		return nil, fmt.Errorf("Bucket %q missing", bucketSkiplist)
 	}
-	postings := tx.Bucket(bucketPostings)
-	if postings == nil {
-		return nil, fmt.Errorf("Bucket %q missing", bucketPostings)
-	}
+	// postings := tx.Bucket(bucketPostings)
+	// if postings == nil {
+	// 	return nil, fmt.Errorf("Bucket %q missing", bucketPostings)
+	// }
 
 	b := skiplist.Bucket(encodeUint64(k))
 	if b == nil {
@@ -94,15 +108,19 @@ func (p *postingsStore) Iter(k uint64) (Iterator, error) {
 			bkt: b,
 		},
 		iterators: iteratorStoreFunc(func(k uint64) (Iterator, error) {
-			data := postings.Get(encodeUint64(k))
-			if data == nil {
+			data, err := pagebufTx.Get(k)
+			if err != nil {
 				return nil, errNotFound
 			}
 			// TODO(fabxc): for now, offset is zero, pages have no header
 			// and are always delta encoded.
 			return newPageDelta(data).cursor(), nil
 		}),
-		close: tx.Rollback,
+		close: func() error {
+			boltTx.Rollback()
+			pagebufTx.Rollback()
+			return nil
+		},
 	}
 
 	return it, nil
@@ -115,23 +133,30 @@ func (p *postingsStore) Append(batches PostingsBatches) error {
 	}
 	defer bufs.release()
 
-	err := p.db.Update(func(tx *bolt.Tx) error {
+	pbtx, err := p.pb.Begin(true)
+	if err != nil {
+		return err
+	}
+
+	err = p.db.Update(func(tx *bolt.Tx) error {
 		sl := tx.Bucket(bucketSkiplist)
 		if sl == nil {
 			return fmt.Errorf("Bucket %q missing", bucketSkiplist)
 		}
-		ps := tx.Bucket(bucketPostings)
-		if ps == nil {
-			return fmt.Errorf("Bucket %q missing", bucketPostings)
-		}
 
 		for k, ids := range batches {
-			if err := p.postingsAppend(bufs, sl, ps, k, ids...); err != nil {
+			if err := p.postingsAppend(bufs, sl, pbtx, k, ids...); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+
+	if err != nil {
+		pbtx.Rollback()
+		return err
+	}
+	err = pbtx.Commit()
 
 	return err
 }
@@ -139,7 +164,7 @@ func (p *postingsStore) Append(batches PostingsBatches) error {
 // postingsAppend a set of monotonically increasing IDs to the postings list
 // of the given key. The first ID must be strictly greater than the last
 // ID in the postings list.
-func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist, postings *bolt.Bucket, key uint64, ids ...uint64) error {
+func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist *bolt.Bucket, pbtx *pagebuf.Tx, key uint64, ids ...uint64) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -153,16 +178,12 @@ func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist, postings *bolt.B
 		bkt: b,
 	}
 
-	createPage := func(id uint64) (uint64, page, error) {
-		pid, err := postings.NextSequence()
-		if err != nil {
-			return 0, nil, err
-		}
-		pg := newPageDelta(bufs.getZero(pageSize))
+	createPage := func(id uint64) (page, error) {
+		pg := newPageDelta(make([]byte, pageSize-pagebuf.PageHeaderSize))
 		if err := pg.init(id); err != nil {
-			return 0, nil, err
+			return nil, err
 		}
-		return pid, pg, sl.append(id, pid)
+		return pg, nil
 	}
 
 	var (
@@ -178,19 +199,19 @@ func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist, postings *bolt.B
 		}
 		// No most recent page for the key exists. The postings list is new and
 		// we have to allocate a new page ID for it.
-		if pid, pg, err = createPage(ids[0]); err != nil {
+		if pg, err = createPage(ids[0]); err != nil {
 			return err
 		}
 		pc = pg.cursor()
 		ids = ids[1:]
 	} else {
 		// Load the most recent page.
-		pdata := encpool.bucketGet(postings, encpool.uint64be(pid))
+		pdata, err := pbtx.Get(pid)
 		if pdata == nil {
-			return fmt.Errorf("page with ID %q does not exist", pid)
+			return fmt.Errorf("error getting page for ID %q: %s", pid, err)
 		}
 
-		pdatac := bufs.get(len(pdata))
+		pdatac := make([]byte, len(pdata))
 		// The byte slice is mmaped from bolt. We have to copy it to make modifications.
 		// pdatac := make([]byte, len(pdata))
 		copy(pdatac, pdata)
@@ -199,16 +220,30 @@ func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist, postings *bolt.B
 		pc = pg.cursor()
 	}
 
+	var lastID uint64
 	for i := 0; i < len(ids); i++ {
+		lastID = ids[i]
 		if err = pc.append(ids[i]); err == errPageFull {
 			// We couldn't append to the page because it was full.
 			// Store away the old page...
-			if err := encpool.bucketPut(postings, encpool.uint64be(pid), pg.data()); err != nil {
-				return err
+			if pid == 0 {
+				// The page was new.
+				pid, err = pbtx.Add(pg.data())
+				if err != nil {
+					return err
+				}
+				if err := sl.append(ids[i], pid); err != nil {
+					return err
+				}
+			} else {
+				if err = pbtx.Set(pid, pg.data()); err != nil {
+					return err
+				}
 			}
 
 			// ... and allocate a new page.
-			if pid, pg, err = createPage(ids[i]); err != nil {
+			pid = 0
+			if pg, err = createPage(ids[i]); err != nil {
 				return err
 			}
 			pc = pg.cursor()
@@ -216,9 +251,23 @@ func (p *postingsStore) postingsAppend(bufs *txbuffs, skiplist, postings *bolt.B
 			return err
 		}
 	}
-
 	// Save the last page we have written to.
-	return encpool.bucketPut(postings, encpool.uint64be(pid), pg.data())
+	if pid == 0 {
+		// The page was new.
+		pid, err = pbtx.Add(pg.data())
+		if err != nil {
+			return err
+		}
+		if err := sl.append(lastID, pid); err != nil {
+			return err
+		}
+	} else {
+		if err = pbtx.Set(pid, pg.data()); err != nil {
+			return err
+		}
+	}
+	// Save the last page we have written to.
+	return nil
 }
 
 type iteratorStoreFunc func(k uint64) (Iterator, error)

@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-const pageSize = 2048
+const pageSize = 1024
 
 var errPageFull = errors.New("page full")
 
