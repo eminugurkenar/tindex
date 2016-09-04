@@ -16,6 +16,21 @@ type Iterator interface {
 	Close() error
 }
 
+// type Iterator interface {
+// 	Next() (docid, ptr)
+// 	Seek(docid) (docid, ptr)
+// 	Err() error
+// }
+
+// var it Iterator
+// var err error
+// for id, ptr := it.Seek(0); it.Err() == nil; id, ptr = it.Next() {
+
+// }
+// if err != nil && err != io.EOF {
+
+// }
+
 type mergeIterator struct {
 	i1, i2 Iterator
 	v1, v2 uint64

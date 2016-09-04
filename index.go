@@ -236,7 +236,7 @@ func (ix *Index) DocTerms(id uint64) (Terms, error) {
 
 	bdocs := tx.Bucket(bktDocIDs)
 
-	v := bdocs.Get(docid(id).bytes())
+	v := bdocs.Get(DocID(id).bytes())
 	if v == nil {
 		return nil, errNotFound
 	}
@@ -276,7 +276,7 @@ func (ix *Index) Batch() (*Batch, error) {
 		ix:       ix,
 		tx:       tx,
 		meta:     &meta{},
-		docs:     map[docid]*Doc{},
+		docs:     map[DocID]*Doc{},
 		postings: postingsBatch{},
 	}
 	*b.meta = *ix.meta
@@ -285,7 +285,7 @@ func (ix *Index) Batch() (*Batch, error) {
 
 // meta contains information about the state of the index.
 type meta struct {
-	LastDocID  docid
+	LastDocID  DocID
 	LastTermID termid
 }
 
@@ -394,13 +394,13 @@ type Batch struct {
 	tx   *bolt.Tx
 	meta *meta
 
-	docs     map[docid]*Doc
+	docs     map[DocID]*Doc
 	postings postingsBatch
 }
 
-type docid uint64
+type DocID uint64
 
-func (d docid) bytes() []byte {
+func (d DocID) bytes() []byte {
 	return encodeUint64(uint64(d))
 }
 
@@ -437,7 +437,7 @@ func (t termids) bytes() []byte {
 }
 
 // postingsBatch is a set of IDs to be appended to the postings list for a term.
-type postingsBatch map[termid][]docid
+type postingsBatch map[termid][]DocID
 
 // Index ensures the document is present in the index and returns its newly
 // created ID. The ID only becomes valid after the batch has been
@@ -513,7 +513,7 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 	skiplist := kvtx.Bucket(bktSkiplist)
 
 	// createPage allocates a new delta-encoded page starting with id as its first entry.
-	createPage := func(id docid) (page, error) {
+	createPage := func(id DocID) (page, error) {
 		pg := newPageDelta(make([]byte, pageSize-pagebuf.PageHeaderSize))
 		if err := pg.init(uint64(id)); err != nil {
 			return nil, err
@@ -566,7 +566,7 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 			pc = pg.cursor()
 		}
 
-		var lastID docid
+		var lastID DocID
 		for i := 0; i < len(ids); i++ {
 			lastID = ids[i]
 			if err = pc.append(uint64(ids[i])); err == errPageFull {
