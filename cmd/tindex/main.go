@@ -169,58 +169,19 @@ func (cmd *benchWriteCmd) run(args ...string) error {
 			n = len(remSets)
 		}
 
-		is, err := ix.EnsureSets(remSets[:n]...)
+		b, err := ix.Batch()
 		if err != nil {
 			return err
 		}
-		ids = append(ids, is...)
+		for _, ts := range remSets[:n] {
+			ids = append(ids, b.Index(&tindex.Doc{Terms: ts}))
+		}
+		fmt.Println("writing batch", n, len(ids))
+		if err := b.Commit(); err != nil {
+			return err
+		}
 
 		remSets = remSets[n:]
-	}
-
-	fmt.Println(" > completed in", time.Since(start))
-
-	fmt.Println(">> setting initial active")
-	start = time.Now()
-
-	if err := ix.Active(start, ids...); err != nil {
-		return err
-	}
-
-	fmt.Println(" > completed in", time.Since(start))
-
-	fmt.Println(">> setting active/inactive")
-	start = time.Now()
-
-	var tdelta time.Duration
-
-	var lenTotal int
-	for i := 0; i < 50; i++ {
-		first := rand.Intn(len(ids))
-		last := first + randNormInt(4000, 1000, 10, len(ids)-first)
-		lenTotal += last - first
-
-		tdelta += time.Duration(rand.Intn(100)) * time.Hour
-
-		if i%2 == 0 {
-			if err := ix.Active(start.Add(tdelta), ids[first:last]...); err != nil {
-				return err
-			}
-		} else {
-			if err := ix.Inactive(start.Add(tdelta), ids[first:last]...); err != nil {
-				return err
-			}
-		}
-	}
-
-	fmt.Println(" > completed in", time.Since(start))
-	fmt.Println(" > average length", lenTotal/50)
-
-	fmt.Println(">> setting final inactive")
-	start = time.Now()
-
-	if err := ix.Inactive(start, ids...); err != nil {
-		return err
 	}
 
 	fmt.Println(" > completed in", time.Since(start))
@@ -309,8 +270,8 @@ func (opts *benchWriteOptions) genLabels() labels {
 	return res
 }
 
-func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Set {
-	res := []tindex.Set{}
+func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Terms {
+	res := []tindex.Terms{}
 
 	lnames := []string{}
 	for ln := range lbls {
@@ -320,7 +281,7 @@ func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Set {
 	instances := map[int]string{}
 
 	for i := 0; i < opts.setsTotal; i++ {
-		s := tindex.Set{}
+		s := tindex.Terms{}
 		nl := opts.randNumLabels()
 		nl = int(math.Min(float64(len(lnames)), float64(nl)))
 
@@ -328,7 +289,10 @@ func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Set {
 			ln := lnames[j]
 			lv := lbls[ln][rand.Intn(len(lbls[ln]))]
 
-			s[ln] = lv
+			s = append(s, tindex.Term{
+				Field: ln,
+				Val:   lv,
+			})
 		}
 
 		if _, ok := instances[i/opts.setsBatchSize]; !ok {
@@ -336,8 +300,8 @@ func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Set {
 		}
 
 		// Typically we one fixed label across all batches and one per batch.
-		s["instance"] = instances[i/opts.setsBatchSize]
-		s["job"] = "node"
+		s = append(s, tindex.Term{Field: "instance", Val: instances[i/opts.setsBatchSize]})
+		s = append(s, tindex.Term{Field: "job", Val: "node"})
 
 		res = append(res, s)
 	}
