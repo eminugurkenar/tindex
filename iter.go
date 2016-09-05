@@ -8,43 +8,19 @@ import (
 // An Iterator provides sorted iteration over a list of uint64s.
 type Iterator interface {
 	// next retrieves the next document ID in the postings list.
-	Next() (uint64, error)
+	Next() (DocID, error)
 	// seek moves the cursor to ID or the closest following one, if it doesn't exist.
 	// It returns the ID at the position.
-	Seek(id uint64) (uint64, error)
-	// Close the iterator
-	Close() error
+	Seek(id DocID) (DocID, error)
 }
-
-// type Iterator interface {
-// 	Next() (docid, ptr)
-// 	Seek(docid) (docid, ptr)
-// 	Err() error
-// }
-
-// var it Iterator
-// var err error
-// for id, ptr := it.Seek(0); it.Err() == nil; id, ptr = it.Next() {
-
-// }
-// if err != nil && err != io.EOF {
-
-// }
 
 type mergeIterator struct {
 	i1, i2 Iterator
-	v1, v2 uint64
+	v1, v2 DocID
 	e1, e2 error
 }
 
-func (it *mergeIterator) Close() error {
-	if err := it.i1.Close(); err != nil {
-		return err
-	}
-	return it.i2.Close()
-}
-
-func (it *mergeIterator) Next() (uint64, error) {
+func (it *mergeIterator) Next() (DocID, error) {
 	if it.e1 == io.EOF && it.e2 == io.EOF {
 		return 0, io.EOF
 	}
@@ -80,7 +56,7 @@ func (it *mergeIterator) Next() (uint64, error) {
 	}
 }
 
-func (it *mergeIterator) Seek(id uint64) (uint64, error) {
+func (it *mergeIterator) Seek(id DocID) (DocID, error) {
 	// We just have to advance the first iterator. The next common match is also
 	// the next seeked ID of the intersection.
 	it.v1, it.e1 = it.i1.Seek(id)
@@ -103,34 +79,25 @@ func Merge(its ...Iterator) Iterator {
 
 // ExpandIterator walks through the iterator and returns the result list.
 // The iterator is closed after completion.
-func ExpandIterator(it Iterator) ([]uint64, error) {
+func ExpandIterator(it Iterator) ([]DocID, error) {
 	var (
-		res = []uint64{}
-		v   uint64
+		res = []DocID{}
+		v   DocID
 		err error
 	)
 	for v, err = it.Seek(0); err == nil; v, err = it.Next() {
 		res = append(res, v)
 	}
 	if err == io.EOF {
-		err = it.Close()
-	} else {
-		it.Close()
+		return res, nil
 	}
 	return res, err
 }
 
 type intersectIterator struct {
 	i1, i2 Iterator
-	v1, v2 uint64
+	v1, v2 DocID
 	e1, e2 error
-}
-
-func (it *intersectIterator) Close() error {
-	if err := it.i1.Close(); err != nil {
-		return err
-	}
-	return it.i2.Close()
 }
 
 // Intersect returns a new Iterator over the intersection of the input iterators.
@@ -146,7 +113,7 @@ func Intersect(its ...Iterator) Iterator {
 	return i1
 }
 
-func (it *intersectIterator) Next() (uint64, error) {
+func (it *intersectIterator) Next() (DocID, error) {
 	for {
 		if it.e1 != nil {
 			return 0, it.e1
@@ -167,7 +134,7 @@ func (it *intersectIterator) Next() (uint64, error) {
 	}
 }
 
-func (it *intersectIterator) Seek(id uint64) (uint64, error) {
+func (it *intersectIterator) Seek(id DocID) (DocID, error) {
 	// We have to advance both iterators. Otherwise, we get a false-positive
 	// match on 0 if only on of the iterators has it.
 	it.v1, it.e1 = it.i1.Seek(id)
@@ -178,9 +145,9 @@ func (it *intersectIterator) Seek(id uint64) (uint64, error) {
 // A skiplist iterator iterates through a list of value/pointer pairs.
 type skiplistIterator interface {
 	// seek returns the value and pointer at or before v.
-	seek(v uint64) (val, ptr uint64, err error)
+	seek(v DocID) (val DocID, ptr uint64, err error)
 	// next returns the next value/pointer pair.
-	next() (val, ptr uint64, err error)
+	next() (val DocID, ptr uint64, err error)
 }
 
 // type skiplistCursor interface {
@@ -204,22 +171,13 @@ type iteratorStore interface {
 type skippingIterator struct {
 	skiplist  skiplistIterator
 	iterators iteratorStore
-	close     func() error
 
 	// The iterator holding the next value.
 	cur Iterator
 }
 
-// Close implements the Iterator interface.
-func (it *skippingIterator) Close() error {
-	if it.close == nil {
-		return nil
-	}
-	return it.close()
-}
-
 // Seek implements the Iterator interface.
-func (it *skippingIterator) Seek(id uint64) (uint64, error) {
+func (it *skippingIterator) Seek(id DocID) (DocID, error) {
 	_, ptr, err := it.skiplist.seek(id)
 	if err != nil {
 		return 0, err
@@ -234,7 +192,7 @@ func (it *skippingIterator) Seek(id uint64) (uint64, error) {
 }
 
 // Next implements the Iterator interface.
-func (it *skippingIterator) Next() (uint64, error) {
+func (it *skippingIterator) Next() (DocID, error) {
 	// If next was called initially.
 	// TODO(fabxc): should this just panic and initial call to seek() be required?
 	if it.cur == nil {
@@ -271,23 +229,19 @@ type plainListIterator struct {
 	pos  int
 }
 
-func newPlainListIterator(l []uint64) *plainListIterator {
+func newPlainListIterator(l []DocID) *plainListIterator {
 	it := &plainListIterator{list: list(l)}
 	sort.Sort(it.list)
 	return it
 }
 
-func (it *plainListIterator) Close() error {
-	return nil
-}
-
-func (it *plainListIterator) Seek(id uint64) (uint64, error) {
+func (it *plainListIterator) Seek(id DocID) (DocID, error) {
 	it.pos = sort.Search(it.list.Len(), func(i int) bool { return it.list[i] >= id })
 	return it.Next()
 
 }
 
-func (it *plainListIterator) Next() (uint64, error) {
+func (it *plainListIterator) Next() (DocID, error) {
 	if it.pos >= it.list.Len() {
 		return 0, io.EOF
 	}
@@ -296,7 +250,7 @@ func (it *plainListIterator) Next() (uint64, error) {
 	return x, nil
 }
 
-type list []uint64
+type list []DocID
 
 func (l list) Len() int           { return len(l) }
 func (l list) Less(i, j int) bool { return l[i] < l[j] }
@@ -305,12 +259,12 @@ func (l list) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
 // plainSkiplistIterator implements the skiplistIterator interface on plain
 // in-memory mapping.
 type plainSkiplistIterator struct {
-	m    map[uint64]uint64
+	m    map[DocID]uint64
 	keys list
 	pos  int
 }
 
-func newPlainSkiplistIterator(m map[uint64]uint64) *plainSkiplistIterator {
+func newPlainSkiplistIterator(m map[DocID]uint64) *plainSkiplistIterator {
 	var keys list
 	for k := range m {
 		keys = append(keys, k)
@@ -323,12 +277,8 @@ func newPlainSkiplistIterator(m map[uint64]uint64) *plainSkiplistIterator {
 	}
 }
 
-func (it *plainSkiplistIterator) Close() error {
-	return nil
-}
-
 // seek implements the skiplistIterator interface.
-func (it *plainSkiplistIterator) seek(id uint64) (uint64, uint64, error) {
+func (it *plainSkiplistIterator) seek(id DocID) (DocID, uint64, error) {
 	pos := sort.Search(len(it.keys), func(i int) bool { return it.keys[i] >= id })
 	// The skiplist iterator points to the element at or before the last value.
 	if pos > 0 && it.keys[pos] > id {
@@ -341,7 +291,7 @@ func (it *plainSkiplistIterator) seek(id uint64) (uint64, uint64, error) {
 }
 
 // next implements the skiplistIterator interface.
-func (it *plainSkiplistIterator) next() (uint64, uint64, error) {
+func (it *plainSkiplistIterator) next() (DocID, uint64, error) {
 	if it.pos >= len(it.keys) {
 		return 0, 0, io.EOF
 	}

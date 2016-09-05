@@ -27,30 +27,30 @@ type boltSkiplistCursor struct {
 	bkt *bolt.Bucket
 }
 
-func (s *boltSkiplistCursor) next() (uint64, uint64, error) {
+func (s *boltSkiplistCursor) next() (DocID, uint64, error) {
 	db, pb := s.c.Next()
 	if db == nil {
 		return 0, 0, io.EOF
 	}
-	return decodeUint64(db), decodeUint64(pb), nil
+	return newDocID(db), decodeUint64(pb), nil
 }
 
-func (s *boltSkiplistCursor) seek(k uint64) (uint64, uint64, error) {
-	db, pb := s.c.Seek(encodeUint64(k))
+func (s *boltSkiplistCursor) seek(k DocID) (DocID, uint64, error) {
+	db, pb := s.c.Seek(k.bytes())
 	if db == nil {
 		db, pb = s.c.Last()
 		if db == nil {
 			return 0, 0, io.EOF
 		}
 	}
-	did, pid := decodeUint64(db), decodeUint64(pb)
+	did, pid := newDocID(db), decodeUint64(pb)
 
 	if did > k {
 		// If the found entry is behind the seeked ID, try the previous
 		// entry if it exists. The page it points to contains the range of k.
 		dbp, pbp := s.c.Prev()
 		if dbp != nil {
-			did, pid = decodeUint64(dbp), decodeUint64(pbp)
+			did, pid = newDocID(dbp), decodeUint64(pbp)
 		} else {
 			// We skipped before the first entry. The cursor is now out of
 			// state and subsequent calls to Next() will return nothing.

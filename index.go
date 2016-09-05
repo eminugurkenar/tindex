@@ -82,9 +82,9 @@ func (ix *Index) Close() error {
 
 var (
 	bktMeta     = []byte("meta")
+	bktDocs     = []byte("docs")
 	bktTerms    = []byte("terms")
 	bktTermIDs  = []byte("term_ids")
-	bktDocIDs   = []byte("docs_ids")
 	bktSkiplist = []byte("skiplist")
 
 	keyMeta = []byte("meta")
@@ -94,7 +94,7 @@ func (ix *Index) init(tx *bolt.Tx) error {
 	// Ensure all buckets exist. Any other index methods assume
 	// that these buckets exist and may panic otherwise.
 	for _, bn := range [][]byte{
-		bktMeta, bktTerms, bktTermIDs, bktDocIDs, bktSkiplist,
+		bktMeta, bktTerms, bktTermIDs, bktDocs, bktSkiplist,
 	} {
 		if _, err := tx.CreateBucketIfNotExists(bn); err != nil {
 			return fmt.Errorf("create bucket %q failed: %s", string(bn), err)
@@ -127,14 +127,14 @@ func (ix *Index) init(tx *bolt.Tx) error {
 
 // Search returns an iterator over all document IDs that match all
 // provided matchers.
-func (ix *Index) Search(matchers ...Matcher) (Iterator, error) {
+func (ix *Index) Search(matchers ...Matcher) (Iterator, func(), error) {
 	kvtx, err := ix.bolt.Begin(false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pbtx, err := ix.pbuf.Begin(false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	bterms := kvtx.Bucket(bktTerms)
@@ -147,37 +147,27 @@ func (ix *Index) Search(matchers ...Matcher) (Iterator, error) {
 	for _, m := range matchers {
 		tids, err := ix.termsForMatcher(bterms, m)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		mits := make([]Iterator, 0, len(tids))
 
 		for _, t := range tids {
 			it, err := ix.postingsIter(bskiplist, pbtx, t)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			mits = append(mits, it)
 		}
 
 		its = append(its, Merge(mits...))
 	}
-	return &closeWrapIterator{
-		close: func() error {
-			kvtx.Rollback()
-			pbtx.Rollback()
-			return nil
-		},
-		Iterator: Intersect(its...),
+	// TODO(fabxc): wrap search in transaction so we can close the read
+	// read transactions of pagebuf and bolt.
+	// For now return close function to be manually invoked
+	return Intersect(its...), func() {
+		pbtx.Rollback()
+		kvtx.Rollback()
 	}, nil
-}
-
-type closeWrapIterator struct {
-	Iterator
-	close func() error
-}
-
-func (it *closeWrapIterator) Close() error {
-	return it.close()
 }
 
 // postingsIter returns an iterator over the postings list of term t.
@@ -202,7 +192,6 @@ func (ix *Index) postingsIter(skiplist *bolt.Bucket, pbtx *pagebuf.Tx, t termid)
 			// and are always delta encoded.
 			return newPageDelta(data).cursor(), nil
 		}),
-		close: func() error { return nil },
 	}
 
 	return it, nil
@@ -219,29 +208,28 @@ func (ix *Index) termsForMatcher(b *bolt.Bucket, m Matcher) (termids, error) {
 	var ids termids
 	err := b.ForEach(func(k, v []byte) error {
 		if m.Match(string(k)) {
-			ids = append(ids, termid(binary.BigEndian.Uint64(v)))
+			ids = append(ids, newTermID(v))
 		}
 		return nil
 	})
 	return ids, err
 }
 
-// DocTerms retrieves the terms for the document with the given ID.
-func (ix *Index) DocTerms(id uint64) (Terms, error) {
+// Doc returns the document with the given ID.
+func (ix *Index) Doc(id DocID) (Terms, error) {
 	tx, err := ix.bolt.Begin(false)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	bdocs := tx.Bucket(bktDocIDs)
+	bdocs := tx.Bucket(bktDocs)
 
-	v := bdocs.Get(DocID(id).bytes())
+	v := bdocs.Get(id.bytes())
 	if v == nil {
 		return nil, errNotFound
 	}
-	var tids termids
-	tids.read(v)
+	tids := newTermIDs(v)
 
 	b := tx.Bucket(bktTermIDs)
 	terms := make(Terms, len(tids))
@@ -252,7 +240,11 @@ func (ix *Index) DocTerms(id uint64) (Terms, error) {
 		if v == nil {
 			return nil, fmt.Errorf("term not found")
 		}
-		terms[i].read(v)
+		term, err := newTerm(v)
+		if err != nil {
+			return nil, err
+		}
+		terms[i] = term
 	}
 	return terms, nil
 }
@@ -308,7 +300,7 @@ type Doc struct {
 	// Mapping of document fields to single terms.
 	Terms Terms
 	// Pointer to document data.
-	Ptr uint64
+	Ptr Ptr
 }
 
 // Terms is a sortable list of terms.
@@ -332,15 +324,14 @@ type Term struct {
 	Field, Val string
 }
 
-// read populates the term with the field name and value encoded in b.
-func (t *Term) read(b []byte) error {
+func newTerm(b []byte) (t Term, e error) {
 	c := bytes.SplitN(b, []byte{0xff}, 2)
 	if len(c) != 2 {
-		return fmt.Errorf("invalid term")
+		return t, fmt.Errorf("invalid term")
 	}
 	t.Field = string(c[0])
 	t.Val = string(c[1])
-	return nil
+	return t, nil
 }
 
 // bytes returns a byte slice representation of the term.
@@ -349,6 +340,17 @@ func (t *Term) bytes() []byte {
 	b = append(b, []byte(t.Field)...)
 	b = append(b, 0xff)
 	return append(b, []byte(t.Val)...)
+}
+
+// Ptr holds an address to a document's contents.
+type Ptr uint64
+
+func newPtr(b []byte) Ptr {
+	return Ptr(decodeUint64(b))
+}
+
+func (p Ptr) bytes() []byte {
+	return encodeUint64(uint64(p))
 }
 
 // Matcher checks whether a value for a key satisfies a check condition.
@@ -398,13 +400,22 @@ type Batch struct {
 	postings postingsBatch
 }
 
+// DocID is a unique identifier for a document.
 type DocID uint64
+
+func newDocID(b []byte) DocID {
+	return DocID(decodeUint64(b))
+}
 
 func (d DocID) bytes() []byte {
 	return encodeUint64(uint64(d))
 }
 
 type termid uint64
+
+func newTermID(b []byte) termid {
+	return termid(decodeUint64(b))
+}
 
 func (t termid) bytes() []byte {
 	return encodeUint64(uint64(t))
@@ -416,14 +427,15 @@ func (t termids) Len() int           { return len(t) }
 func (t termids) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
 func (t termids) Less(i, j int) bool { return t[i] < t[j] }
 
-// read reads a sequence of uvarints from b and appends them
+// newTermIDs reads a sequence of uvarints from b and appends them
 // to the term IDs.
-func (t termids) read(b []byte) {
+func newTermIDs(b []byte) (t termids) {
 	for len(b) > 0 {
 		k, n := binary.Uvarint(b)
 		t = append(t, termid(k))
 		b = b[n:]
 	}
+	return t
 }
 
 // bytes encodes the term IDs as a sequence of uvarints.
@@ -496,8 +508,10 @@ func (b *Batch) addDoc(tx *bolt.Tx, d *Doc, tids termids) error {
 	b.meta.LastDocID++
 	idb := b.meta.LastDocID.bytes()
 
-	ibkt := tx.Bucket(bktDocIDs)
-	if err := ibkt.Put(idb, tids.bytes()); err != nil {
+	ibkt := tx.Bucket(bktDocs)
+	v := append(tids.bytes(), 0xff)
+	v = append(v, d.Ptr.bytes()...)
+	if err := ibkt.Put(idb, v); err != nil {
 		return err
 	}
 
@@ -515,7 +529,7 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 	// createPage allocates a new delta-encoded page starting with id as its first entry.
 	createPage := func(id DocID) (page, error) {
 		pg := newPageDelta(make([]byte, pageSize-pagebuf.PageHeaderSize))
-		if err := pg.init(uint64(id)); err != nil {
+		if err := pg.init(id); err != nil {
 			return nil, err
 		}
 		return pg, nil
@@ -569,7 +583,7 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 		var lastID DocID
 		for i := 0; i < len(ids); i++ {
 			lastID = ids[i]
-			if err = pc.append(uint64(ids[i])); err == errPageFull {
+			if err = pc.append(ids[i]); err == errPageFull {
 				// We couldn't append to the page because it was full.
 				// Store away the old page...
 				if pid == 0 {

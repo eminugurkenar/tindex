@@ -12,12 +12,12 @@ var errPageFull = errors.New("page full")
 
 type pageCursor interface {
 	Iterator
-	append(v uint64) error
+	append(v DocID) error
 }
 
 type page interface {
 	cursor() pageCursor
-	init(v uint64) error
+	init(v DocID) error
 	data() []byte
 }
 
@@ -29,9 +29,9 @@ func newPageDelta(data []byte) *pageDelta {
 	return &pageDelta{b: data}
 }
 
-func (p *pageDelta) init(v uint64) error {
+func (p *pageDelta) init(v DocID) error {
 	// Write first value.
-	binary.PutUvarint(p.b, v)
+	binary.PutUvarint(p.b, uint64(v))
 	return nil
 }
 
@@ -46,10 +46,10 @@ func (p *pageDelta) data() []byte {
 type pageDeltaCursor struct {
 	data []byte
 	pos  int
-	cur  uint64
+	cur  DocID
 }
 
-func (p *pageDeltaCursor) append(id uint64) error {
+func (p *pageDeltaCursor) append(id DocID) error {
 	// Run to the end.
 	_, err := p.Next()
 	for ; err == nil; _, err = p.Next() {
@@ -64,7 +64,7 @@ func (p *pageDeltaCursor) append(id uint64) error {
 	if p.cur >= id {
 		return errOutOfOrder
 	}
-	p.pos += binary.PutUvarint(p.data[p.pos:], id-p.cur)
+	p.pos += binary.PutUvarint(p.data[p.pos:], uint64(id-p.cur))
 	p.cur = id
 
 	return nil
@@ -74,7 +74,7 @@ func (p *pageDeltaCursor) Close() error {
 	return nil
 }
 
-func (p *pageDeltaCursor) Seek(min uint64) (v uint64, err error) {
+func (p *pageDeltaCursor) Seek(min DocID) (v DocID, err error) {
 	if min < p.cur {
 		p.pos = 0
 	}
@@ -84,17 +84,18 @@ func (p *pageDeltaCursor) Seek(min uint64) (v uint64, err error) {
 	return p.cur, err
 }
 
-func (p *pageDeltaCursor) Next() (uint64, error) {
+func (p *pageDeltaCursor) Next() (DocID, error) {
 	var n int
+	var dv uint64
 	if p.pos == 0 {
-		p.cur, n = binary.Uvarint(p.data)
+		dv, n = binary.Uvarint(p.data)
+		p.cur = DocID(dv)
 	} else {
-		var dv uint64
 		dv, n = binary.Uvarint(p.data[p.pos:])
 		if n <= 0 || dv == 0 {
 			return 0, io.EOF
 		}
-		p.cur += dv
+		p.cur += DocID(dv)
 	}
 	p.pos += n
 
