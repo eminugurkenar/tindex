@@ -66,7 +66,6 @@ func (p *pageDeltaCursor) append(id DocID) error {
 	}
 	p.pos += binary.PutUvarint(p.data[p.pos:], uint64(id-p.cur))
 	p.cur = id
-
 	return nil
 }
 

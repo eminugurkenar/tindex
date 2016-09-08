@@ -110,8 +110,8 @@ func (ix *Index) init(tx *bolt.Tx) error {
 	} else {
 		// Index not initialized yet, set up meta information.
 		ix.meta = &meta{
-			LastDocID:  1,
-			LastTermID: 1,
+			LastDocID:  0,
+			LastTermID: 0,
 		}
 		v, err := ix.meta.bytes()
 		if err != nil {
@@ -127,7 +127,7 @@ func (ix *Index) init(tx *bolt.Tx) error {
 
 // Search returns an iterator over all document IDs that match all
 // provided matchers.
-func (ix *Index) Search(matchers ...Matcher) (Iterator, func(), error) {
+func (ix *Index) Search(matchers ...Matcher) (Iterator, func() error, error) {
 	kvtx, err := ix.bolt.Begin(false)
 	if err != nil {
 		return nil, nil, err
@@ -159,14 +159,24 @@ func (ix *Index) Search(matchers ...Matcher) (Iterator, func(), error) {
 			mits = append(mits, it)
 		}
 
-		its = append(its, Merge(mits...))
+		if len(mits) > 0 {
+			its = append(its, Merge(mits...))
+		}
+	}
+	if len(its) == 0 {
+		// TODO(fabxc): should this just return an empty iterator?
+		return nil, nil, fmt.Errorf("no iterators found")
 	}
 	// TODO(fabxc): wrap search in transaction so we can close the read
 	// read transactions of pagebuf and bolt.
 	// For now return close function to be manually invoked
-	return Intersect(its...), func() {
-		pbtx.Rollback()
-		kvtx.Rollback()
+	return Intersect(its...), func() error {
+		err0 := pbtx.Rollback()
+		err1 := kvtx.Rollback()
+		if err0 != nil {
+			return err0
+		}
+		return err1
 	}, nil
 }
 
@@ -229,7 +239,8 @@ func (ix *Index) Doc(id DocID) (Terms, error) {
 	if v == nil {
 		return nil, errNotFound
 	}
-	tids := newTermIDs(v)
+	l, n := binary.Uvarint(v)
+	tids := newTermIDs(v[n : n+int(l)])
 
 	b := tx.Bucket(bktTermIDs)
 	terms := make(Terms, len(tids))
@@ -468,8 +479,10 @@ func (b *Batch) Commit() error {
 	if err := b.tx.Rollback(); err != nil {
 		return err
 	}
-	b.ix.bolt.Update(func(tx *bolt.Tx) error {
-		for _, d := range b.docs {
+	err := b.ix.bolt.Update(func(tx *bolt.Tx) error {
+		// Iterate documents in insertion order.
+		for id := b.ix.meta.LastDocID + 1; id < b.meta.LastDocID; id++ {
+			d := b.docs[id]
 			// Sort the term IDs and store them.
 			tids, err := b.ensureTerms(tx, d.Terms)
 			if err != nil {
@@ -477,7 +490,7 @@ func (b *Batch) Commit() error {
 			}
 			sort.Sort(tids)
 
-			if err := b.addDoc(tx, d, tids); err != nil {
+			if err := b.addDoc(tx, id, d, tids); err != nil {
 				return err
 			}
 		}
@@ -494,7 +507,7 @@ func (b *Batch) Commit() error {
 		}
 		return b.updateMeta(tx)
 	})
-	return nil
+	return err
 }
 
 // Rollback drops all changes applied in the batch.
@@ -503,21 +516,27 @@ func (b *Batch) Rollback() error {
 	return b.tx.Rollback()
 }
 
-func (b *Batch) addDoc(tx *bolt.Tx, d *Doc, tids termids) error {
-	// Allocate a new document ID and map it to the terms.
-	b.meta.LastDocID++
-	idb := b.meta.LastDocID.bytes()
+func (b *Batch) addDoc(tx *bolt.Tx, id DocID, d *Doc, tids termids) error {
+	idb := id.bytes()
 
 	ibkt := tx.Bucket(bktDocs)
-	v := append(tids.bytes(), 0xff)
-	v = append(v, d.Ptr.bytes()...)
+	sort.Sort(tids)
+
+	tidsb := tids.bytes()
+	ptrb := d.Ptr.bytes()
+
+	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(ptrb))
+	n := binary.PutUvarint(v, uint64(len(tidsb)))
+	copy(v[n:], tidsb)
+	copy(v[n+len(tidsb):], ptrb)
+
 	if err := ibkt.Put(idb, v); err != nil {
 		return err
 	}
 
 	// Add document to postings batch for each term.
 	for _, t := range tids {
-		b.postings[t] = append(b.postings[t], b.meta.LastDocID)
+		b.postings[t] = append(b.postings[t], id)
 	}
 	return nil
 }
