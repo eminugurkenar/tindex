@@ -188,6 +188,41 @@ func (cmd *benchWriteCmd) run(args ...string) error {
 
 	cmd.stopProfiling()
 
+	fmt.Println("query all")
+	start = time.Now()
+
+	// m := tindex.NewEqualMatcher("job", "node")
+	m := tindex.NewEqualMatcher("instance", "my-fancy-instance-1")
+
+	it, close, err := ix.Search(m)
+	if err != nil {
+		return err
+	}
+	defer close()
+
+	docs, err := tindex.ExpandIterator(it)
+	if err != nil {
+		return err
+	}
+	for _, d := range docs {
+		_, err := ix.Doc(d)
+		if err != nil {
+			return err
+		}
+	}
+	fmt.Println(" > res size", len(docs))
+	fmt.Println(" > completed in", time.Since(start))
+
+	kvst, err := os.Stat(dir + "/kv")
+	if err != nil {
+		return err
+	}
+	fmt.Println("index size kv", float64(kvst.Size())/1024/1024)
+	pbst, err := os.Stat(dir + "/pb")
+	if err != nil {
+		return err
+	}
+	fmt.Println("index size pb", float64(pbst.Size())/1024/1024)
 	return nil
 }
 
@@ -296,7 +331,7 @@ func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Terms {
 		}
 
 		if _, ok := instances[i/opts.setsBatchSize]; !ok {
-			instances[i/opts.setsBatchSize] = randString(16)
+			instances[i/opts.setsBatchSize] = fmt.Sprintf("my-fancy-instance-%d", i/opts.setsBatchSize)
 		}
 
 		// Typically we one fixed label across all batches and one per batch.
