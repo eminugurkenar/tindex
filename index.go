@@ -310,8 +310,8 @@ func (m *meta) bytes() ([]byte, error) {
 type Doc struct {
 	// Mapping of document fields to single terms.
 	Terms Terms
-	// Pointer to document data.
-	Ptr Ptr
+	// Document data or pointer.
+	Body Body
 }
 
 // Terms is a sortable list of terms.
@@ -353,16 +353,8 @@ func (t *Term) bytes() []byte {
 	return append(b, []byte(t.Val)...)
 }
 
-// Ptr holds an address to a document's contents.
-type Ptr uint64
-
-func newPtr(b []byte) Ptr {
-	return Ptr(decodeUint64(b))
-}
-
-func (p Ptr) bytes() []byte {
-	return encodeUint64(uint64(p))
-}
+// Body holds a document's content or pointer to it.
+type Body []byte
 
 // Matcher checks whether a value for a key satisfies a check condition.
 type Matcher interface {
@@ -523,12 +515,11 @@ func (b *Batch) addDoc(tx *bolt.Tx, id DocID, d *Doc, tids termids) error {
 	sort.Sort(tids)
 
 	tidsb := tids.bytes()
-	ptrb := d.Ptr.bytes()
 
-	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(ptrb))
+	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(d.Body))
 	n := binary.PutUvarint(v, uint64(len(tidsb)))
 	copy(v[n:], tidsb)
-	copy(v[n+len(tidsb):], ptrb)
+	copy(v[n+len(tidsb):], d.Body)
 
 	if err := ibkt.Put(idb, v); err != nil {
 		return err

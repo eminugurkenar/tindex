@@ -128,7 +128,9 @@ func BenchmarkIntersect(t *testing.B) {
 	t.ResetTimer()
 
 	for i := 0; i < t.N; i++ {
-		Intersect(i1, i2, i3, i4)
+		if _, err := ExpandIterator(Intersect(i1, i2, i3, i4)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
