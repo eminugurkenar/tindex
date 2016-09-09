@@ -457,10 +457,10 @@ type postingsBatch map[termid][]DocID
 // Index ensures the document is present in the index and returns its newly
 // created ID. The ID only becomes valid after the batch has been
 // executed successfully.
-func (b *Batch) Index(d *Doc) uint64 {
+func (b *Batch) Index(d *Doc) DocID {
 	b.meta.LastDocID++
 	b.docs[b.meta.LastDocID] = d
-	return uint64(b.meta.LastDocID)
+	return b.meta.LastDocID
 }
 
 // Commit executes the batched indexing against the underlying index.

@@ -1,405 +1,152 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
-	"math"
-	"math/rand"
 	"os"
-	"runtime"
-	"runtime/pprof"
-	"strings"
 	"time"
 
 	"github.com/fabxc/tindex"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/spf13/cobra"
 )
 
-var errUsage = errors.New("usage error")
-
 func main() {
-	if err := Main(os.Args[1:]...); err == errUsage {
-		fmt.Fprintln(os.Stderr, usage())
-		os.Exit(2)
-	} else if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	root := &cobra.Command{
+		Use:   "tindex",
+		Short: "CLI tool for tindex",
+	}
+
+	root.AddCommand(
+		NewBenchCommand(),
+	)
+
+	root.Execute()
+}
+
+func NewBenchCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "bench",
+		Short: "run benchmarks",
+	}
+	c.AddCommand(NewBenchWriteCommand())
+
+	return c
+}
+
+func NewBenchWriteCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "write <file>",
+		Short: "run a write performance benchmark",
+		Run:   writeBenchmark,
 	}
 }
 
-func usage() string {
-	return strings.TrimLeft(`
-tindex tool
-
-Usage:
-
-	tindex command [arguments...]
-
-Available commands:
-
-	help           print this help text
-	bench-write    run write benchmarks against tindex
-
-Use "tindex command -h" for usage information about the command.
-`, "\n")
-}
-
-type command interface {
-	run(...string) error
-	usage() string
-}
-
-func Main(args ...string) error {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return errUsage
+func writeBenchmark(cmd *cobra.Command, args []string) {
+	if len(args) != 1 {
+		exitWithError(fmt.Errorf("missing file argument"))
 	}
 
-	var cmd command
+	var docs []*tindex.Doc
 
-	switch args[0] {
-	case "bench-write":
-		cmd = &benchWriteCmd{}
-	case "bench-read":
-		cmd = &benchReadCmd{}
-	default:
-		return errUsage
-	}
+	measureTime("readData", func() {
+		f, err := os.Open(args[0])
+		if err != nil {
+			exitWithError(err)
+		}
+		defer f.Close()
 
-	err := cmd.run(args[1:]...)
-	if err == errUsage {
-		fmt.Fprintln(os.Stderr, cmd.usage())
-	}
-	return err
-}
+		docs, err = readPrometheusLabels(f)
+		if err != nil {
+			exitWithError(err)
+		}
+	})
 
-type benchReadCmd struct {
-	fs *flag.FlagSet
-}
-
-func (cmd *benchReadCmd) usage() string {
-	cmd.fs.Usage()
-	return ""
-}
-
-type benchReadOptions struct {
-}
-
-func (cmd *benchReadCmd) run(args ...string) error {
-	// fs := flag.NewFlagSet("", flag.ContinueOnError)
-	return nil
-}
-
-type benchWriteCmd struct {
-	fs *flag.FlagSet
-}
-
-type benchWriteOptions struct {
-	labelsTotal     int
-	labelsAvgValues int
-	labelsMinValues int
-	labelsMaxValues int
-
-	setsTotal     int
-	setsAvgLabels int
-	setsMinLabels int
-	setsMaxLabels int
-
-	setsBatchSize int
-
-	CPUProfile   string
-	MemProfile   string
-	BlockProfile string
-}
-
-func (cmd *benchWriteCmd) usage() string {
-	cmd.fs.Usage()
-	return ""
-}
-
-func (cmd *benchWriteCmd) run(args ...string) error {
-	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	opts := &benchWriteOptions{}
-
-	fs.IntVar(&opts.labelsTotal, "labels.total", 3000, "total number of distinct key/value labels")
-	fs.IntVar(&opts.labelsAvgValues, "labels.avg-values", 10, "avg number of values per label key")
-	fs.IntVar(&opts.labelsMinValues, "labels.min-values", 10, "minimum values per label key")
-	fs.IntVar(&opts.labelsMaxValues, "labels.max-values", 1000, "maximum values per label key")
-	fs.IntVar(&opts.setsTotal, "sets.total", 1000000, "total number of sets")
-	fs.IntVar(&opts.setsAvgLabels, "sets.avg-labels", 3, "min number of labels per set")
-	fs.IntVar(&opts.setsMinLabels, "sets.min-labels", 1, "min number of labels per set")
-	fs.IntVar(&opts.setsMaxLabels, "sets.max-labels", 8, "max number of labels per set")
-	fs.IntVar(&opts.setsBatchSize, "sets.batch-size", 5000, "batch size for writing new sets")
-
-	fs.StringVar(&opts.CPUProfile, "cpuprofile", "", "")
-	fs.StringVar(&opts.MemProfile, "memprofile", "", "")
-	fs.StringVar(&opts.BlockProfile, "blockprofile", "", "")
-
-	cmd.fs = fs
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	fmt.Println(">> generating test data")
-
-	lbls := opts.genLabels()
-	sets := opts.genSets(lbls)
-
-	dir, err := ioutil.TempDir("", "tindex-bench")
+	dir, err := ioutil.TempDir("", "tindex_bench")
 	if err != nil {
-		return err
+		exitWithError(err)
 	}
-
 	ix, err := tindex.Open(dir, nil)
 	if err != nil {
-		return err
+		exitWithError(err)
 	}
 
-	fmt.Println(">> writing sets")
-	start := time.Now()
-	cmd.startProfiling(opts)
+	measureTime("indexData", func() {
+		indexDocs(ix, docs, 100000)
+	})
+}
 
-	var ids []uint64
+func indexDocs(ix *tindex.Index, docs []*tindex.Doc, batchSize int) {
+	remDocs := docs[:]
+	var ids []tindex.DocID
 
-	remSets := sets[:]
-	for len(remSets) > 0 {
-		n := opts.setsBatchSize
-		if n > len(remSets) {
-			n = len(remSets)
+	for len(remDocs) > 0 {
+		n := batchSize
+		if n > len(remDocs) {
+			n = len(remDocs)
 		}
 
 		b, err := ix.Batch()
 		if err != nil {
-			return err
+			exitWithError(err)
 		}
-		for _, ts := range remSets[:n] {
-			ids = append(ids, b.Index(&tindex.Doc{Terms: ts}))
+		for _, d := range remDocs[:n] {
+			ids = append(ids, b.Index(d))
 		}
-		fmt.Println("writing batch", n, len(ids))
 		if err := b.Commit(); err != nil {
-			return err
+			exitWithError(err)
 		}
 
-		remSets = remSets[n:]
-	}
-
-	fmt.Println(" > completed in", time.Since(start))
-
-	cmd.stopProfiling()
-
-	fmt.Println("query all")
-	start = time.Now()
-
-	// m := tindex.NewEqualMatcher("job", "node")
-	m := tindex.NewEqualMatcher("instance", "my-fancy-instance-1")
-
-	it, close, err := ix.Search(m)
-	if err != nil {
-		return err
-	}
-	defer close()
-
-	docs, err := tindex.ExpandIterator(it)
-	if err != nil {
-		return err
-	}
-	for _, d := range docs {
-		_, err := ix.Doc(d)
-		if err != nil {
-			return err
-		}
-	}
-	fmt.Println(" > res size", len(docs))
-	fmt.Println(" > completed in", time.Since(start))
-
-	kvst, err := os.Stat(dir + "/kv")
-	if err != nil {
-		return err
-	}
-	fmt.Println("index size kv", float64(kvst.Size())/1024/1024)
-	pbst, err := os.Stat(dir + "/pb")
-	if err != nil {
-		return err
-	}
-	fmt.Println("index size pb", float64(pbst.Size())/1024/1024)
-	return nil
-}
-
-// Starts all profiles set on the opts.
-func (cmd *benchWriteCmd) startProfiling(opts *benchWriteOptions) {
-	var err error
-
-	// Start CPU profiling.
-	if opts.CPUProfile != "" {
-		cpuprofile, err = os.Create(opts.CPUProfile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "bench: could not create cpu profile %q: %v\n", opts.CPUProfile, err)
-			os.Exit(1)
-		}
-		pprof.StartCPUProfile(cpuprofile)
-	}
-
-	// Start memory profiling.
-	if opts.MemProfile != "" {
-		memprofile, err = os.Create(opts.MemProfile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "bench: could not create memory profile %q: %v\n", opts.MemProfile, err)
-			os.Exit(1)
-		}
-		runtime.MemProfileRate = 4096
-	}
-
-	// Start fatal profiling.
-	if opts.BlockProfile != "" {
-		blockprofile, err = os.Create(opts.BlockProfile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "bench: could not create block profile %q: %v\n", opts.BlockProfile, err)
-			os.Exit(1)
-		}
-		runtime.SetBlockProfileRate(1)
+		remDocs = remDocs[n:]
 	}
 }
 
-// File handlers for the various profiles.
-var cpuprofile, memprofile, blockprofile *os.File
-
-// Stops all profiles.
-func (cmd *benchWriteCmd) stopProfiling() {
-	if cpuprofile != nil {
-		pprof.StopCPUProfile()
-		cpuprofile.Close()
-		cpuprofile = nil
-	}
-
-	if memprofile != nil {
-		pprof.Lookup("heap").WriteTo(memprofile, 0)
-		memprofile.Close()
-		memprofile = nil
-	}
-
-	if blockprofile != nil {
-		pprof.Lookup("block").WriteTo(blockprofile, 0)
-		blockprofile.Close()
-		blockprofile = nil
-		runtime.SetBlockProfileRate(0)
-	}
+func measureTime(stage string, f func()) {
+	fmt.Printf(">> start stage=%s\n", stage)
+	start := time.Now()
+	f()
+	fmt.Printf(">> completed stage=%s duration=%s\n", stage, time.Since(start))
 }
 
-type labels map[string][]string
+func readPrometheusLabels(r io.Reader) ([]*tindex.Doc, error) {
+	dec := expfmt.NewDecoder(r, expfmt.FmtProtoText)
 
-func (opts *benchWriteOptions) genLabels() labels {
-	res := labels{}
-	i := 0
+	var docs []*tindex.Doc
+	var mf dto.MetricFamily
 
-	for i < opts.labelsTotal {
-		var vals []string
-		nvals := opts.randNumValues()
-		for j := 0; j < nvals && i < opts.labelsTotal; j++ {
-			vals = append(vals, opts.randValue())
-			i++
-		}
-		res[opts.randName()] = vals
-	}
-
-	return res
-}
-
-func (opts *benchWriteOptions) genSets(lbls labels) []tindex.Terms {
-	res := []tindex.Terms{}
-
-	lnames := []string{}
-	for ln := range lbls {
-		lnames = append(lnames, ln)
-	}
-
-	instances := map[int]string{}
-
-	for i := 0; i < opts.setsTotal; i++ {
-		s := tindex.Terms{}
-		nl := opts.randNumLabels()
-		nl = int(math.Min(float64(len(lnames)), float64(nl)))
-
-		for _, j := range rand.Perm(len(lnames))[:nl] {
-			ln := lnames[j]
-			lv := lbls[ln][rand.Intn(len(lbls[ln]))]
-
-			s = append(s, tindex.Term{
-				Field: ln,
-				Val:   lv,
-			})
+	for {
+		if err := dec.Decode(&mf); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
 		}
 
-		if _, ok := instances[i/opts.setsBatchSize]; !ok {
-			instances[i/opts.setsBatchSize] = fmt.Sprintf("my-fancy-instance-%d", i/opts.setsBatchSize)
+		for _, m := range mf.GetMetric() {
+			d := &tindex.Doc{
+				Terms: make(tindex.Terms, len(m.GetLabel())+1),
+				Body:  []byte("1234567890"),
+			}
+			d.Terms[0] = tindex.Term{
+				Field: "__name__",
+				Val:   mf.GetName(),
+			}
+			for i, l := range m.GetLabel() {
+				d.Terms[i+1] = tindex.Term{
+					Field: l.GetName(),
+					Val:   l.GetValue(),
+				}
+			}
+			docs = append(docs, d)
 		}
-
-		// Typically we one fixed label across all batches and one per batch.
-		s = append(s, tindex.Term{Field: "instance", Val: instances[i/opts.setsBatchSize]})
-		s = append(s, tindex.Term{Field: "job", Val: "node"})
-
-		res = append(res, s)
 	}
 
-	return res
+	return docs, nil
 }
 
-func (opts *benchWriteOptions) randNumValues() int {
-	return randNormInt(
-		opts.labelsAvgValues,
-		(opts.labelsMaxValues-opts.labelsMinValues)*2,
-		opts.labelsMinValues,
-		opts.labelsMaxValues,
-	)
-}
-
-func (opts *benchWriteOptions) randNumLabels() int {
-	return randNormInt(
-		opts.setsAvgLabels,
-		(opts.setsMaxLabels-opts.setsMinLabels)*2,
-		opts.setsMinLabels,
-		opts.setsMaxLabels,
-	)
-}
-
-func (opts *benchWriteOptions) randName() string {
-	return randString(randNormInt(6, 3, 3, 18))
-}
-
-func (opts *benchWriteOptions) randValue() string {
-	return randString(randNormInt(8, 3, 3, 64))
-}
-
-func randNormInt(mean, stddev, min, max int) int {
-	v := rand.NormFloat64()*float64(stddev) + float64(mean)
-	v = math.Min(v, float64(max))
-	v = math.Max(v, float64(min))
-	return int(v)
-}
-
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-)
-
-var src = rand.NewSource(1)
-
-func randString(n int) string {
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
-	}
-
-	return string(b)
+func exitWithError(err error) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }
