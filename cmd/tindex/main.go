@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fabxc/tindex"
@@ -72,6 +73,11 @@ func writeBenchmark(cmd *cobra.Command, args []string) {
 	if err != nil {
 		exitWithError(err)
 	}
+	defer func() {
+		ix.Close()
+		reportSize(dir)
+		os.RemoveAll(dir)
+	}()
 
 	measureTime("indexData", func() {
 		indexDocs(ix, docs, 100000)
@@ -100,6 +106,19 @@ func indexDocs(ix *tindex.Index, docs []*tindex.Doc, batchSize int) {
 		}
 
 		remDocs = remDocs[n:]
+	}
+}
+
+func reportSize(dir string) {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || path == dir {
+			return err
+		}
+		fmt.Printf(" > file=%s size=%.03fGB\n", path[len(dir):], float64(info.Size())/1e9)
+		return nil
+	})
+	if err != nil {
+		exitWithError(err)
 	}
 }
 
