@@ -1,7 +1,6 @@
 package tindex
 
 import (
-	// "fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -9,12 +8,12 @@ import (
 
 func TestPageDelta(t *testing.T) {
 	var (
-		vals []uint64
-		last uint64
+		vals []DocID
+		last DocID
 	)
 	for i := 0; i < 10000; i++ {
 		vals = append(vals, last)
-		last += uint64(rand.Int63n(1<<9) + 1)
+		last += DocID(rand.Int63n(1<<9) + 1)
 	}
 	data := make([]byte, pageSize)
 	page := newPageDelta(data)
@@ -49,12 +48,12 @@ func TestPageDelta(t *testing.T) {
 
 func BenchmarkPageDeltaAppend(b *testing.B) {
 	var (
-		vals []uint64
-		last uint64
+		vals []DocID
+		last DocID
 	)
 	for i := 0; i < 10000; i++ {
 		vals = append(vals, last)
-		last += uint64(rand.Int63n(1<<10) + 1)
+		last += DocID(rand.Int63n(1<<10) + 1)
 	}
 
 	b.ResetTimer()
@@ -82,12 +81,12 @@ func BenchmarkPageDeltaAppend(b *testing.B) {
 
 func BenchmarkPageDeltaRead(b *testing.B) {
 	var (
-		vals []uint64
-		last uint64
+		vals []DocID
+		last DocID
 	)
 	for i := 0; i < 10000; i++ {
 		vals = append(vals, last)
-		last += uint64(rand.Int63n(1<<10) + 1)
+		last += DocID(rand.Int63n(1<<10) + 1)
 	}
 	data := make([]byte, pageSize)
 	page := newPageDelta(data)

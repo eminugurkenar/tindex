@@ -7,14 +7,14 @@ import (
 
 func TestMultiIntersect(t *testing.T) {
 	var cases = []struct {
-		a, b, c []uint64
-		res     []uint64
+		a, b, c []DocID
+		res     []DocID
 	}{
 		{
-			a:   []uint64{1, 2, 3, 4, 5, 6, 1000, 1001},
-			b:   []uint64{2, 4, 5, 6, 7, 8, 999, 1001},
-			c:   []uint64{1, 2, 5, 6, 7, 8, 1001, 1200},
-			res: []uint64{2, 5, 6, 1001},
+			a:   []DocID{1, 2, 3, 4, 5, 6, 1000, 1001},
+			b:   []DocID{2, 4, 5, 6, 7, 8, 999, 1001},
+			c:   []DocID{1, 2, 5, 6, 7, 8, 1001, 1200},
+			res: []DocID{2, 5, 6, 1001},
 		},
 	}
 
@@ -35,27 +35,27 @@ func TestMultiIntersect(t *testing.T) {
 
 func TestIntersectIterator(t *testing.T) {
 	var cases = []struct {
-		a, b []uint64
-		res  []uint64
+		a, b []DocID
+		res  []DocID
 	}{
 		{
-			a:   []uint64{1, 2, 3, 4, 5},
-			b:   []uint64{6, 7, 8, 9, 10},
-			res: []uint64{},
+			a:   []DocID{1, 2, 3, 4, 5},
+			b:   []DocID{6, 7, 8, 9, 10},
+			res: []DocID{},
 		},
 		{
-			a:   []uint64{1, 2, 3, 4, 5},
-			b:   []uint64{4, 5, 6, 7, 8},
-			res: []uint64{4, 5},
+			a:   []DocID{1, 2, 3, 4, 5},
+			b:   []DocID{4, 5, 6, 7, 8},
+			res: []DocID{4, 5},
 		},
 		{
-			a:   []uint64{1, 2, 3, 4, 9, 10},
-			b:   []uint64{1, 4, 5, 6, 7, 8, 10, 11},
-			res: []uint64{1, 4, 10},
+			a:   []DocID{1, 2, 3, 4, 9, 10},
+			b:   []DocID{1, 4, 5, 6, 7, 8, 10, 11},
+			res: []DocID{1, 4, 10},
 		}, {
-			a:   []uint64{1},
-			b:   []uint64{0, 1},
-			res: []uint64{1},
+			a:   []DocID{1},
+			b:   []DocID{0, 1},
+			res: []DocID{1},
 		},
 	}
 
@@ -75,14 +75,14 @@ func TestIntersectIterator(t *testing.T) {
 
 func TestMergeIntersect(t *testing.T) {
 	var cases = []struct {
-		a, b, c []uint64
-		res     []uint64
+		a, b, c []DocID
+		res     []DocID
 	}{
 		{
-			a:   []uint64{1, 2, 3, 4, 5, 6, 1000, 1001},
-			b:   []uint64{2, 4, 5, 6, 7, 8, 999, 1001},
-			c:   []uint64{1, 2, 5, 6, 7, 8, 1001, 1200},
-			res: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 999, 1000, 1001, 1200},
+			a:   []DocID{1, 2, 3, 4, 5, 6, 1000, 1001},
+			b:   []DocID{2, 4, 5, 6, 7, 8, 999, 1001},
+			c:   []DocID{1, 2, 5, 6, 7, 8, 1001, 1200},
+			res: []DocID{1, 2, 3, 4, 5, 6, 7, 8, 999, 1000, 1001, 1200},
 		},
 	}
 
@@ -102,22 +102,22 @@ func TestMergeIntersect(t *testing.T) {
 }
 
 func BenchmarkIntersect(t *testing.B) {
-	var a, b, c, d []uint64
+	var a, b, c, d []DocID
 
 	for i := 0; i < 10000000; i += 2 {
-		a = append(a, uint64(i))
+		a = append(a, DocID(i))
 	}
 	for i := 5000000; i < 5000100; i += 4 {
-		b = append(b, uint64(i))
+		b = append(b, DocID(i))
 	}
 	for i := 5090000; i < 5090600; i += 4 {
-		b = append(b, uint64(i))
+		b = append(b, DocID(i))
 	}
 	for i := 4990000; i < 5100000; i++ {
-		c = append(c, uint64(i))
+		c = append(c, DocID(i))
 	}
 	for i := 4000000; i < 6000000; i++ {
-		d = append(d, uint64(i))
+		d = append(d, DocID(i))
 	}
 
 	i1 := newPlainListIterator(a)
@@ -134,23 +134,23 @@ func BenchmarkIntersect(t *testing.B) {
 
 func TestMergeIterator(t *testing.T) {
 	var cases = []struct {
-		a, b []uint64
-		res  []uint64
+		a, b []DocID
+		res  []DocID
 	}{
 		{
-			a:   []uint64{1, 2, 3, 4, 5},
-			b:   []uint64{6, 7, 8, 9, 10},
-			res: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+			a:   []DocID{1, 2, 3, 4, 5},
+			b:   []DocID{6, 7, 8, 9, 10},
+			res: []DocID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 		},
 		{
-			a:   []uint64{1, 2, 3, 4, 5},
-			b:   []uint64{4, 5, 6, 7, 8},
-			res: []uint64{1, 2, 3, 4, 5, 6, 7, 8},
+			a:   []DocID{1, 2, 3, 4, 5},
+			b:   []DocID{4, 5, 6, 7, 8},
+			res: []DocID{1, 2, 3, 4, 5, 6, 7, 8},
 		},
 		{
-			a:   []uint64{1, 2, 3, 4, 9, 10},
-			b:   []uint64{1, 4, 5, 6, 7, 8, 10, 11},
-			res: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+			a:   []DocID{1, 2, 3, 4, 9, 10},
+			b:   []DocID{1, 4, 5, 6, 7, 8, 10, 11},
+			res: []DocID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
 		},
 	}
 
@@ -172,10 +172,10 @@ func TestSkippingIterator(t *testing.T) {
 	var cases = []struct {
 		skiplist skiplistIterator
 		its      iteratorStore
-		res      []uint64
+		res      []DocID
 	}{
 		{
-			skiplist: newPlainSkiplistIterator(map[uint64]uint64{
+			skiplist: newPlainSkiplistIterator(map[DocID]uint64{
 				5:   3,
 				50:  2,
 				500: 1,
@@ -185,10 +185,10 @@ func TestSkippingIterator(t *testing.T) {
 				2: newPlainListIterator(list{54, 60, 61}),
 				1: newPlainListIterator(list{1200, 1300, 100000}),
 			},
-			res: []uint64{5, 7, 8, 9, 54, 60, 61, 1200, 1300, 100000},
+			res: []DocID{5, 7, 8, 9, 54, 60, 61, 1200, 1300, 100000},
 		},
 		{
-			skiplist: newPlainSkiplistIterator(map[uint64]uint64{
+			skiplist: newPlainSkiplistIterator(map[DocID]uint64{
 				0:  3,
 				50: 2,
 			}),
@@ -196,7 +196,7 @@ func TestSkippingIterator(t *testing.T) {
 				3: newPlainListIterator(list{5, 7, 8, 9}),
 				2: newPlainListIterator(list{54, 60, 61}),
 			},
-			res: []uint64{5, 7, 8, 9, 54, 60, 61},
+			res: []DocID{5, 7, 8, 9, 54, 60, 61},
 		},
 	}
 
