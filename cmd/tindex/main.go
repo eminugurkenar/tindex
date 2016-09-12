@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"time"
 
 	"github.com/fabxc/tindex"
@@ -37,17 +39,44 @@ func NewBenchCommand() *cobra.Command {
 	return c
 }
 
-func NewBenchWriteCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "write <file>",
-		Short: "run a write performance benchmark",
-		Run:   writeBenchmark,
-	}
+type writeBenchmark struct {
+	outPath string
+	cleanup bool
+
+	cpuprof   *os.File
+	memprof   *os.File
+	blockprof *os.File
 }
 
-func writeBenchmark(cmd *cobra.Command, args []string) {
+func NewBenchWriteCommand() *cobra.Command {
+	var wb writeBenchmark
+	c := &cobra.Command{
+		Use:   "write <file>",
+		Short: "run a write performance benchmark",
+		Run:   wb.run,
+	}
+	c.PersistentFlags().StringVar(&wb.outPath, "out", "benchout/", "set the output path")
+
+	return c
+}
+
+func (b *writeBenchmark) run(cmd *cobra.Command, args []string) {
 	if len(args) != 1 {
 		exitWithError(fmt.Errorf("missing file argument"))
+	}
+	if b.outPath == "" {
+		dir, err := ioutil.TempDir("", "tindex_bench")
+		if err != nil {
+			exitWithError(err)
+		}
+		b.outPath = dir
+		b.cleanup = true
+	}
+	if err := os.RemoveAll(b.outPath); err != nil {
+		exitWithError(err)
+	}
+	if err := os.MkdirAll(b.outPath, 0777); err != nil {
+		exitWithError(err)
 	}
 
 	var docs []*tindex.Doc
@@ -65,10 +94,8 @@ func writeBenchmark(cmd *cobra.Command, args []string) {
 		}
 	})
 
-	dir, err := ioutil.TempDir("", "tindex_bench")
-	if err != nil {
-		exitWithError(err)
-	}
+	dir := filepath.Join(b.outPath, "ix")
+
 	ix, err := tindex.Open(dir, nil)
 	if err != nil {
 		exitWithError(err)
@@ -76,12 +103,60 @@ func writeBenchmark(cmd *cobra.Command, args []string) {
 	defer func() {
 		ix.Close()
 		reportSize(dir)
-		os.RemoveAll(dir)
+		if b.cleanup {
+			os.RemoveAll(b.outPath)
+		}
 	}()
 
 	measureTime("indexData", func() {
+		b.startProfiling()
 		indexDocs(ix, docs, 100000)
+		b.stopProfiling()
 	})
+}
+
+func (b *writeBenchmark) startProfiling() {
+	var err error
+
+	// Start CPU profiling.
+	b.cpuprof, err = os.Create(filepath.Join(b.outPath, "cpu.prof"))
+	if err != nil {
+		exitWithError(fmt.Errorf("bench: could not create cpu profile: %v\n", err))
+	}
+	pprof.StartCPUProfile(b.cpuprof)
+
+	// Start memory profiling.
+	b.memprof, err = os.Create(filepath.Join(b.outPath, "mem.prof"))
+	if err != nil {
+		exitWithError(fmt.Errorf("bench: could not create memory profile: %v\n", err))
+	}
+	runtime.MemProfileRate = 4096
+
+	// Start fatal profiling.
+	b.blockprof, err = os.Create(filepath.Join(b.outPath, "block.prof"))
+	if err != nil {
+		exitWithError(fmt.Errorf("bench: could not create block profile: %v\n", err))
+	}
+	runtime.SetBlockProfileRate(1)
+}
+
+func (b *writeBenchmark) stopProfiling() {
+	if b.cpuprof != nil {
+		pprof.StopCPUProfile()
+		b.cpuprof.Close()
+		b.cpuprof = nil
+	}
+	if b.memprof != nil {
+		pprof.Lookup("heap").WriteTo(b.memprof, 0)
+		b.memprof.Close()
+		b.memprof = nil
+	}
+	if b.blockprof != nil {
+		pprof.Lookup("block").WriteTo(b.blockprof, 0)
+		b.blockprof.Close()
+		b.blockprof = nil
+		runtime.SetBlockProfileRate(0)
+	}
 }
 
 func indexDocs(ix *tindex.Index, docs []*tindex.Doc, batchSize int) {
@@ -114,7 +189,7 @@ func reportSize(dir string) {
 		if err != nil || path == dir {
 			return err
 		}
-		fmt.Printf(" > file=%s size=%.03fGB\n", path[len(dir):], float64(info.Size())/1e9)
+		fmt.Printf(" > file=%s size=%.03fGiB\n", path[len(dir):], float64(info.Size())/1024/1024/1024)
 		return nil
 	})
 	if err != nil {
