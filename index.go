@@ -278,11 +278,12 @@ func (ix *Index) Batch() (*Batch, error) {
 		return nil, err
 	}
 	b := &Batch{
-		ix:       ix,
-		tx:       tx,
-		meta:     &meta{},
-		docs:     map[DocID]*Doc{},
-		postings: postingsBatch{},
+		ix:        ix,
+		tx:        tx,
+		meta:      &meta{},
+		docs:      map[DocID]*Doc{},
+		termCache: map[Term]termid{},
+		postings:  postingsBatch{},
 	}
 	*b.meta = *ix.meta
 	return b, nil
@@ -401,8 +402,9 @@ type Batch struct {
 	tx   *bolt.Tx
 	meta *meta
 
-	docs     map[DocID]*Doc
-	postings postingsBatch
+	docs      map[DocID]*Doc
+	termCache map[Term]termid
+	postings  postingsBatch
 }
 
 // DocID is a unique identifier for a document.
@@ -677,14 +679,17 @@ func (b *Batch) ensureTerms(tx *bolt.Tx, terms Terms) (termids, error) {
 
 	res := make(termids, 0, len(terms))
 	for _, t := range terms {
-		// If the entire field is new, create a bucket for it.
-		fbkt, err := tbkt.CreateBucketIfNotExists([]byte(t.Field))
-		if err != nil {
-			return nil, fmt.Errorf("creating field bucket %q failed: %s", t.Field, err)
+		if id, ok := b.termCache[t]; ok {
+			res = append(res, id)
+			continue
 		}
-		idb := fbkt.Get([]byte(t.Val))
+		tb := t.bytes()
+
+		idb := tbkt.Get(tb)
 		if idb != nil {
-			res = append(res, termid(decodeUint64(idb)))
+			id := termid(decodeUint64(idb))
+			b.termCache[t] = id
+			res = append(res, id)
 			continue
 		}
 		// The term for the field is new. Get the next ID and create a
@@ -692,13 +697,14 @@ func (b *Batch) ensureTerms(tx *bolt.Tx, terms Terms) (termids, error) {
 		b.meta.LastTermID++
 		bid := encodeUint64(uint64(b.meta.LastTermID))
 
-		if err := fbkt.Put([]byte(t.Val), bid); err != nil {
+		if err := tbkt.Put(tb, bid); err != nil {
 			return nil, fmt.Errorf("setting term failed: %s", err)
 		}
-		if err := ibkt.Put(bid, t.bytes()); err != nil {
+		if err := ibkt.Put(bid, tb); err != nil {
 			return nil, fmt.Errorf("setting term failed: %s", err)
 		}
 
+		b.termCache[t] = b.meta.LastTermID
 		res = append(res, b.meta.LastTermID)
 	}
 	return res, nil
