@@ -1,6 +1,7 @@
 package tindex
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/boltdb/bolt"
@@ -38,10 +39,7 @@ func (s *boltSkiplistCursor) next() (DocID, uint64, error) {
 func (s *boltSkiplistCursor) seek(k DocID) (DocID, uint64, error) {
 	db, pb := s.c.Seek(k.bytes())
 	if db == nil {
-		db, pb = s.c.Last()
-		if db == nil {
-			return 0, 0, io.EOF
-		}
+		return 0, 0, io.EOF
 	}
 	did, pid := newDocID(db), decodeUint64(pb)
 
@@ -61,12 +59,13 @@ func (s *boltSkiplistCursor) seek(k DocID) (DocID, uint64, error) {
 	return did, pid, nil
 }
 
-func (s *boltSkiplistCursor) append(d, p uint64) error {
+func (s *boltSkiplistCursor) append(d DocID, p uint64) error {
 	k, _ := s.c.Last()
 
 	if k != nil && decodeUint64(k) >= uint64(d) {
+		fmt.Println("ooo2", k, d, p)
 		return errOutOfOrder
 	}
 
-	return s.bkt.Put(encodeUint64(d), encodeUint64(p))
+	return s.bkt.Put(encodeUint64(uint64(d)), encodeUint64(p))
 }

@@ -25,6 +25,12 @@ type pageDelta struct {
 	b []byte
 }
 
+type pageType uint8
+
+const (
+	pageTypeDelta pageType = iota
+)
+
 func newPageDelta(data []byte) *pageDelta {
 	return &pageDelta{b: data}
 }

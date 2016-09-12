@@ -55,7 +55,9 @@ func Open(path string, opts *Options) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	pdb, err := pagebuf.Open(filepath.Join(path, "pb"), 0666, nil)
+	pdb, err := pagebuf.Open(filepath.Join(path, "pb"), 0666, &pagebuf.Options{
+		PageSize: pageSize,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +547,15 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 		return pg, nil
 	}
 
-	for t, ids := range b.postings {
+	var tids termids
+	for t := range b.postings {
+		tids = append(tids, t)
+	}
+	sort.Sort(tids)
+
+	for _, t := range tids {
+		ids := b.postings[t]
+
 		b, err := skiplist.CreateBucketIfNotExists(t.bytes())
 		if err != nil {
 			return err
@@ -590,9 +600,7 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 			pc = pg.cursor()
 		}
 
-		var lastID DocID
 		for i := 0; i < len(ids); i++ {
-			lastID = ids[i]
 			if err = pc.append(ids[i]); err == errPageFull {
 				// We couldn't append to the page because it was full.
 				// Store away the old page...
@@ -602,7 +610,11 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 					if err != nil {
 						return err
 					}
-					if err := sl.append(uint64(ids[i]), pid); err != nil {
+					first, err := pc.Seek(0)
+					if err != nil {
+						return err
+					}
+					if err := sl.append(first, pid); err != nil {
 						return err
 					}
 				} else {
@@ -628,7 +640,11 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 			if err != nil {
 				return err
 			}
-			if err := sl.append(uint64(lastID), pid); err != nil {
+			first, err := pc.Seek(0)
+			if err != nil {
+				return err
+			}
+			if err := sl.append(first, pid); err != nil {
 				return err
 			}
 		} else {
