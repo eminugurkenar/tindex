@@ -281,9 +281,9 @@ func (ix *Index) Batch() (*Batch, error) {
 		ix:        ix,
 		tx:        tx,
 		meta:      &meta{},
-		docs:      map[DocID]*Doc{},
-		termCache: map[Term]termid{},
-		postings:  postingsBatch{},
+		termBkt:   tx.Bucket(bktTerms),
+		termidBkt: tx.Bucket(bktTermIDs),
+		terms:     map[Term]*batchTerm{},
 	}
 	*b.meta = *ix.meta
 	return b, nil
@@ -311,10 +311,8 @@ func (m *meta) bytes() ([]byte, error) {
 
 // Doc is a document that can be stored in an index.
 type Doc struct {
-	// Mapping of document fields to single terms.
-	Terms Terms
-	// Document data or pointer.
-	Body Body
+	ID   DocID
+	Body Body // Document data or pointer.
 }
 
 // Terms is a sortable list of terms.
@@ -402,9 +400,22 @@ type Batch struct {
 	tx   *bolt.Tx
 	meta *meta
 
-	docs      map[DocID]*Doc
-	termCache map[Term]termid
-	postings  postingsBatch
+	termBkt   *bolt.Bucket
+	termidBkt *bolt.Bucket
+
+	docs  []*batchDoc
+	terms map[Term]*batchTerm
+}
+
+type batchDoc struct {
+	id    DocID
+	terms termids
+	body  Body
+}
+
+type batchTerm struct {
+	id   termid  // zero if term has not been added yet
+	docs []DocID // documents to be indexed for the term
 }
 
 // DocID is a unique identifier for a document.
@@ -455,16 +466,44 @@ func (t termids) bytes() []byte {
 	return b[:n]
 }
 
-// postingsBatch is a set of IDs to be appended to the postings list for a term.
-type postingsBatch map[termid][]DocID
-
-// Index ensures the document is present in the index and returns its newly
-// created ID. The ID only becomes valid after the batch has been
-// executed successfully.
-func (b *Batch) Index(d *Doc) DocID {
+// Add adds a new document and returns a unique ID for it.
+// The ID only becomes valid after the batch has been committed successfully.
+func (b *Batch) Add(body Body) DocID {
 	b.meta.LastDocID++
-	b.docs[b.meta.LastDocID] = d
+	b.docs = append(b.docs, &batchDoc{
+		id:    b.meta.LastDocID,
+		body:  body,
+		terms: make(termids, 0, 10),
+	})
 	return b.meta.LastDocID
+}
+
+// Index adds index entries for the document ID for the given terms.
+// The caller has to ensure that no document with a smaller ID has been
+// indexed for the same term before.
+func (b *Batch) Index(id DocID, terms Terms) {
+	// Subtract last document ID before this batch was started.
+	d := b.docs[id-b.ix.meta.LastDocID-1]
+	for _, t := range terms {
+		tb := b.terms[t]
+		// Populate term if necessary and allocate a new ID if it
+		// hasn't been created in the database before.
+		if tb == nil {
+			tb = &batchTerm{docs: make([]DocID, 0, 1024)}
+			b.terms[t] = tb
+
+			if idb := b.termBkt.Get(t.bytes()); idb != nil {
+				tb.id = termid(decodeUint64(idb))
+			} else {
+				b.meta.LastTermID++
+				tb.id = b.meta.LastTermID
+			}
+		}
+		d.terms = append(d.terms, tb.id)
+
+		// Add the document ID for later appending to the inverted index.
+		tb.docs = append(tb.docs, id)
+	}
 }
 
 // Commit executes the batched indexing against the underlying index.
@@ -476,20 +515,29 @@ func (b *Batch) Commit() error {
 		return err
 	}
 	err := b.ix.bolt.Update(func(tx *bolt.Tx) error {
-		// Iterate documents in insertion order.
-		for id := b.ix.meta.LastDocID + 1; id < b.meta.LastDocID; id++ {
-			d := b.docs[id]
-			// Sort the term IDs and store them.
-			tids, err := b.ensureTerms(tx, d.Terms)
-			if err != nil {
-				return err
-			}
-			sort.Sort(tids)
-
-			if err := b.addDoc(tx, id, d, tids); err != nil {
+		for _, d := range b.docs {
+			if err := b.addDoc(tx, d.id, d.body, d.terms); err != nil {
 				return err
 			}
 		}
+		// Add newly allocated terms.
+		termBkt := tx.Bucket(bktTerms)
+		termidBkt := tx.Bucket(bktTermIDs)
+
+		for t, tb := range b.terms {
+			if tb.id > b.ix.meta.LastTermID {
+				bid := encodeUint64(uint64(tb.id))
+				tby := t.bytes()
+
+				if err := termBkt.Put(tby, bid); err != nil {
+					return fmt.Errorf("setting term failed: %s", err)
+				}
+				if err := termidBkt.Put(bid, tby); err != nil {
+					return fmt.Errorf("setting term failed: %s", err)
+				}
+			}
+		}
+
 		pbtx, err := b.ix.pbuf.Begin(true)
 		if err != nil {
 			return err
@@ -512,7 +560,7 @@ func (b *Batch) Rollback() error {
 	return b.tx.Rollback()
 }
 
-func (b *Batch) addDoc(tx *bolt.Tx, id DocID, d *Doc, tids termids) error {
+func (b *Batch) addDoc(tx *bolt.Tx, id DocID, body Body, tids termids) error {
 	idb := id.bytes()
 
 	ibkt := tx.Bucket(bktDocs)
@@ -520,20 +568,12 @@ func (b *Batch) addDoc(tx *bolt.Tx, id DocID, d *Doc, tids termids) error {
 
 	tidsb := tids.bytes()
 
-	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(d.Body))
+	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(body))
 	n := binary.PutUvarint(v, uint64(len(tidsb)))
 	copy(v[n:], tidsb)
-	copy(v[n+len(tidsb):], d.Body)
+	copy(v[n+len(tidsb):], body)
 
-	if err := ibkt.Put(idb, v); err != nil {
-		return err
-	}
-
-	// Add document to postings batch for each term.
-	for _, t := range tids {
-		b.postings[t] = append(b.postings[t], id)
-	}
-	return nil
+	return ibkt.Put(idb, v)
 }
 
 // writePostings adds the postings batch to the index.
@@ -549,21 +589,15 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 		return pg, nil
 	}
 
-	var tids termids
-	for t := range b.postings {
-		tids = append(tids, t)
-	}
-	sort.Sort(tids)
-
-	for _, t := range tids {
-		ids := b.postings[t]
+	for t, tb := range b.terms {
+		ids := tb.docs
 
 		b, err := skiplist.CreateBucketIfNotExists(t.bytes())
 		if err != nil {
 			return err
 		}
 		sl := &boltSkiplistCursor{
-			k:   uint64(t),
+			k:   uint64(tb.id),
 			c:   b.Cursor(),
 			bkt: b,
 		}
@@ -671,41 +705,4 @@ func (b *Batch) updateMeta(tx *bolt.Tx) error {
 		return fmt.Errorf("error encoding meta: %s", err)
 	}
 	return bkt.Put([]byte(keyMeta), v)
-}
-
-func (b *Batch) ensureTerms(tx *bolt.Tx, terms Terms) (termids, error) {
-	tbkt := tx.Bucket(bktTerms)
-	ibkt := tx.Bucket(bktTermIDs)
-
-	res := make(termids, 0, len(terms))
-	for _, t := range terms {
-		if id, ok := b.termCache[t]; ok {
-			res = append(res, id)
-			continue
-		}
-		tb := t.bytes()
-
-		idb := tbkt.Get(tb)
-		if idb != nil {
-			id := termid(decodeUint64(idb))
-			b.termCache[t] = id
-			res = append(res, id)
-			continue
-		}
-		// The term for the field is new. Get the next ID and create a
-		// bi-directional mapping for it.
-		b.meta.LastTermID++
-		bid := encodeUint64(uint64(b.meta.LastTermID))
-
-		if err := tbkt.Put(tb, bid); err != nil {
-			return nil, fmt.Errorf("setting term failed: %s", err)
-		}
-		if err := ibkt.Put(bid, tb); err != nil {
-			return nil, fmt.Errorf("setting term failed: %s", err)
-		}
-
-		b.termCache[t] = b.meta.LastTermID
-		res = append(res, b.meta.LastTermID)
-	}
-	return res, nil
 }

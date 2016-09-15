@@ -79,7 +79,7 @@ func (b *writeBenchmark) run(cmd *cobra.Command, args []string) {
 		exitWithError(err)
 	}
 
-	var docs []*tindex.Doc
+	var docs []*InsertDoc
 
 	measureTime("readData", func() {
 		f, err := os.Open(args[0])
@@ -159,7 +159,7 @@ func (b *writeBenchmark) stopProfiling() {
 	}
 }
 
-func indexDocs(ix *tindex.Index, docs []*tindex.Doc, batchSize int) {
+func indexDocs(ix *tindex.Index, docs []*InsertDoc, batchSize int) {
 	remDocs := docs[:]
 	var ids []tindex.DocID
 
@@ -174,7 +174,9 @@ func indexDocs(ix *tindex.Index, docs []*tindex.Doc, batchSize int) {
 			exitWithError(err)
 		}
 		for _, d := range remDocs[:n] {
-			ids = append(ids, b.Index(d))
+			id := b.Add(d.Body)
+			b.Index(id, d.Terms)
+			ids = append(ids, id)
 		}
 		if err := b.Commit(); err != nil {
 			exitWithError(err)
@@ -204,10 +206,15 @@ func measureTime(stage string, f func()) {
 	fmt.Printf(">> completed stage=%s duration=%s\n", stage, time.Since(start))
 }
 
-func readPrometheusLabels(r io.Reader) ([]*tindex.Doc, error) {
+type InsertDoc struct {
+	Body  tindex.Body
+	Terms tindex.Terms
+}
+
+func readPrometheusLabels(r io.Reader) ([]*InsertDoc, error) {
 	dec := expfmt.NewDecoder(r, expfmt.FmtProtoText)
 
-	var docs []*tindex.Doc
+	var docs []*InsertDoc
 	var mf dto.MetricFamily
 
 	for {
@@ -219,7 +226,7 @@ func readPrometheusLabels(r io.Reader) ([]*tindex.Doc, error) {
 		}
 
 		for _, m := range mf.GetMetric() {
-			d := &tindex.Doc{
+			d := &InsertDoc{
 				Terms: make(tindex.Terms, len(m.GetLabel())+1),
 				Body:  []byte("1234567890"),
 			}
