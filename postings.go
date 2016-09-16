@@ -1,7 +1,6 @@
 package tindex
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/boltdb/bolt"
@@ -63,7 +62,6 @@ func (s *boltSkiplistCursor) append(d DocID, p uint64) error {
 	k, _ := s.c.Last()
 
 	if k != nil && decodeUint64(k) >= uint64(d) {
-		fmt.Println("ooo2", k, d, p)
 		return errOutOfOrder
 	}
 

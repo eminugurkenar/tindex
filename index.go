@@ -127,64 +127,67 @@ func (ix *Index) init(tx *bolt.Tx) error {
 	return nil
 }
 
-// Search returns an iterator over all document IDs that match all
-// provided matchers.
-func (ix *Index) Search(matchers ...Matcher) (Iterator, func() error, error) {
+// Querier starts a new query session against the index.
+func (ix *Index) Querier() (*Querier, error) {
 	kvtx, err := ix.bolt.Begin(false)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	pbtx, err := ix.pbuf.Begin(false)
 	if err != nil {
-		return nil, nil, err
+		kvtx.Rollback()
+		return nil, err
 	}
-
-	bterms := kvtx.Bucket(bktTerms)
-	bskiplist := kvtx.Bucket(bktSkiplist)
-
-	// The union of iterators for a single matcher are merged.
-	// The merge iterators of each matcher are then intersected.
-	its := make([]Iterator, 0, len(matchers))
-
-	for _, m := range matchers {
-		tids, err := ix.termsForMatcher(bterms, m)
-		if err != nil {
-			return nil, nil, err
-		}
-		mits := make([]Iterator, 0, len(tids))
-
-		for _, t := range tids {
-			it, err := ix.postingsIter(bskiplist, pbtx, t)
-			if err != nil {
-				return nil, nil, err
-			}
-			mits = append(mits, it)
-		}
-
-		if len(mits) > 0 {
-			its = append(its, Merge(mits...))
-		}
-	}
-	if len(its) == 0 {
-		// TODO(fabxc): should this just return an empty iterator?
-		return nil, nil, fmt.Errorf("no iterators found")
-	}
-	// TODO(fabxc): wrap search in transaction so we can close the read
-	// read transactions of pagebuf and bolt.
-	// For now return close function to be manually invoked
-	return Intersect(its...), func() error {
-		err0 := pbtx.Rollback()
-		err1 := kvtx.Rollback()
-		if err0 != nil {
-			return err0
-		}
-		return err1
+	return &Querier{
+		kvtx:        kvtx,
+		pbtx:        pbtx,
+		termBkt:     kvtx.Bucket(bktTerms),
+		skiplistBkt: kvtx.Bucket(bktSkiplist),
 	}, nil
 }
 
+// Querier encapsulates the index for several queries.
+type Querier struct {
+	kvtx *bolt.Tx
+	pbtx *pagebuf.Tx
+
+	termBkt     *bolt.Bucket
+	skiplistBkt *bolt.Bucket
+}
+
+// Close closes the underlying index transactions.
+func (q *Querier) Close() error {
+	err0 := q.pbtx.Rollback()
+	err1 := q.kvtx.Rollback()
+	if err0 != nil {
+		return err0
+	}
+	return err1
+}
+
+// Search returns an iterator over all document IDs that match all
+// provided matchers.
+func (q *Querier) Search(m Matcher) (Iterator, error) {
+	tids := q.termsForMatcher(m)
+	its := make([]Iterator, 0, len(tids))
+	fmt.Println("tids", tids)
+	for _, t := range tids {
+		it, err := q.postingsIter(t)
+		if err != nil {
+			return nil, err
+		}
+		its = append(its, it)
+	}
+
+	if len(its) == 0 {
+		return nil, nil
+	}
+	return Merge(its...), nil
+}
+
 // postingsIter returns an iterator over the postings list of term t.
-func (ix *Index) postingsIter(skiplist *bolt.Bucket, pbtx *pagebuf.Tx, t termid) (Iterator, error) {
-	b := skiplist.Bucket(t.bytes())
+func (q *Querier) postingsIter(t termid) (Iterator, error) {
+	b := q.skiplistBkt.Bucket(t.bytes())
 	if b == nil {
 		return nil, errNotFound
 	}
@@ -196,7 +199,7 @@ func (ix *Index) postingsIter(skiplist *bolt.Bucket, pbtx *pagebuf.Tx, t termid)
 			bkt: b,
 		},
 		iterators: iteratorStoreFunc(func(k uint64) (Iterator, error) {
-			data, err := pbtx.Get(k)
+			data, err := q.pbtx.Get(k)
 			if err != nil {
 				return nil, errNotFound
 			}
@@ -209,22 +212,19 @@ func (ix *Index) postingsIter(skiplist *bolt.Bucket, pbtx *pagebuf.Tx, t termid)
 	return it, nil
 }
 
-func (ix *Index) termsForMatcher(b *bolt.Bucket, m Matcher) (termids, error) {
-	// If there's no bucket for the field, we match zero terms.
-	if b = b.Bucket([]byte(m.Key())); b == nil {
-		return nil, nil
-	}
+func (q *Querier) termsForMatcher(m Matcher) termids {
+	c := q.termBkt.Cursor()
+	pref := append([]byte(m.Key()), 0xff)
 
+	var ids termids
 	// TODO(fabxc): We scan the entire term value range for the field. Improvide this by direct
 	// and prefixed seeks depending on the matcher.
-	var ids termids
-	err := b.ForEach(func(k, v []byte) error {
-		if m.Match(string(k)) {
+	for k, v := c.Seek(pref); bytes.HasPrefix(k, pref); k, v = c.Next() {
+		if m.Match(string(k[len(pref):])) {
 			ids = append(ids, newTermID(v))
 		}
-		return nil
-	})
-	return ids, err
+	}
+	return ids
 }
 
 // Doc returns the document with the given ID.
@@ -589,10 +589,10 @@ func (b *Batch) writePostingsBatch(kvtx *bolt.Tx, pbtx *pagebuf.Tx) error {
 		return pg, nil
 	}
 
-	for t, tb := range b.terms {
+	for _, tb := range b.terms {
 		ids := tb.docs
 
-		b, err := skiplist.CreateBucketIfNotExists(t.bytes())
+		b, err := skiplist.CreateBucketIfNotExists(tb.id.bytes())
 		if err != nil {
 			return err
 		}

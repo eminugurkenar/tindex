@@ -7,9 +7,9 @@ import (
 
 // An Iterator provides sorted iteration over a list of uint64s.
 type Iterator interface {
-	// next retrieves the next document ID in the postings list.
+	// Next retrieves the next document ID in the postings list.
 	Next() (DocID, error)
-	// seek moves the cursor to ID or the closest following one, if it doesn't exist.
+	// Seek moves the cursor to ID or the closest following one, if it doesn't exist.
 	// It returns the ID at the position.
 	Seek(id DocID) (DocID, error)
 }
