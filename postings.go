@@ -38,7 +38,10 @@ func (s *boltSkiplistCursor) next() (DocID, uint64, error) {
 func (s *boltSkiplistCursor) seek(k DocID) (DocID, uint64, error) {
 	db, pb := s.c.Seek(k.bytes())
 	if db == nil {
-		return 0, 0, io.EOF
+		db, pb = s.c.Last()
+		if db == nil {
+			return 0, 0, io.EOF
+		}
 	}
 	did, pid := newDocID(db), decodeUint64(pb)
 

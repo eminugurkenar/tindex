@@ -170,7 +170,7 @@ func (q *Querier) Close() error {
 func (q *Querier) Search(m Matcher) (Iterator, error) {
 	tids := q.termsForMatcher(m)
 	its := make([]Iterator, 0, len(tids))
-	fmt.Println("tids", tids)
+
 	for _, t := range tids {
 		it, err := q.postingsIter(t)
 		if err != nil {
