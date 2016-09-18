@@ -111,6 +111,9 @@ func (b *writeBenchmark) run(cmd *cobra.Command, args []string) {
 	measureTime("indexData", func() {
 		b.startProfiling()
 		indexDocs(ix, docs, 100000)
+		indexDocs(ix, docs, 100000)
+		indexDocs(ix, docs, 100000)
+		indexDocs(ix, docs, 100000)
 		b.stopProfiling()
 	})
 }
@@ -174,8 +177,7 @@ func indexDocs(ix *tindex.Index, docs []*InsertDoc, batchSize int) {
 			exitWithError(err)
 		}
 		for _, d := range remDocs[:n] {
-			id := b.Add(d.Body)
-			b.Index(id, d.Terms)
+			id := b.Add(d.Terms)
 			ids = append(ids, id)
 		}
 		if err := b.Commit(); err != nil {
@@ -207,7 +209,6 @@ func measureTime(stage string, f func()) {
 }
 
 type InsertDoc struct {
-	Body  tindex.Body
 	Terms tindex.Terms
 }
 
@@ -228,7 +229,6 @@ func readPrometheusLabels(r io.Reader) ([]*InsertDoc, error) {
 		for _, m := range mf.GetMetric() {
 			d := &InsertDoc{
 				Terms: make(tindex.Terms, len(m.GetLabel())+1),
-				Body:  []byte("1234567890"),
 			}
 			d.Terms[0] = tindex.Term{
 				Field: "__name__",

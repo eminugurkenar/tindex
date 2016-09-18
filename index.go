@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"sync"
 
 	"github.com/boltdb/bolt"
@@ -309,12 +308,6 @@ func (m *meta) bytes() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Doc is a document that can be stored in an index.
-type Doc struct {
-	ID   DocID
-	Body Body // Document data or pointer.
-}
-
 // Terms is a sortable list of terms.
 type Terms []Term
 
@@ -354,9 +347,6 @@ func (t *Term) bytes() []byte {
 	return append(b, []byte(t.Val)...)
 }
 
-// Body holds a document's content or pointer to it.
-type Body []byte
-
 // Matcher checks whether a value for a key satisfies a check condition.
 type Matcher interface {
 	Key() string
@@ -392,31 +382,6 @@ func NewRegexpMatcher(key string, expr string) (*RegexpMatcher, error) {
 
 func (m *RegexpMatcher) Key() string         { return m.key }
 func (m *RegexpMatcher) Match(s string) bool { return m.re.MatchString(s) }
-
-// Batch collects multiple indexing actions and allows to apply them
-// to the persistet index all at once for improved performance.
-type Batch struct {
-	ix   *Index
-	tx   *bolt.Tx
-	meta *meta
-
-	termBkt   *bolt.Bucket
-	termidBkt *bolt.Bucket
-
-	docs  []*batchDoc
-	terms map[Term]*batchTerm
-}
-
-type batchDoc struct {
-	id    DocID
-	terms termids
-	body  Body
-}
-
-type batchTerm struct {
-	id   termid  // zero if term has not been added yet
-	docs []DocID // documents to be indexed for the term
-}
 
 // DocID is a unique identifier for a document.
 type DocID uint64
@@ -466,24 +431,39 @@ func (t termids) bytes() []byte {
 	return b[:n]
 }
 
-// Add adds a new document and returns a unique ID for it.
-// The ID only becomes valid after the batch has been committed successfully.
-func (b *Batch) Add(body Body) DocID {
-	b.meta.LastDocID++
-	b.docs = append(b.docs, &batchDoc{
-		id:    b.meta.LastDocID,
-		body:  body,
-		terms: make(termids, 0, 10),
-	})
-	return b.meta.LastDocID
+// Batch collects multiple indexing actions and allows to apply them
+// to the persistet index all at once for improved performance.
+type Batch struct {
+	ix   *Index
+	tx   *bolt.Tx
+	meta *meta
+
+	termBkt   *bolt.Bucket
+	termidBkt *bolt.Bucket
+
+	docs  []*batchDoc
+	terms map[Term]*batchTerm
 }
 
-// Index adds index entries for the document ID for the given terms.
-// The caller has to ensure that no document with a smaller ID has been
-// indexed for the same term before.
-func (b *Batch) Index(id DocID, terms Terms) {
+type batchDoc struct {
+	id    DocID
+	terms termids
+}
+
+type batchTerm struct {
+	id   termid  // zero if term has not been added yet
+	docs []DocID // documents to be indexed for the term
+}
+
+// Add adds a new document with the given terms to the index and
+// returns a new unique ID for it.
+// The ID only becomes valid after the batch has been committed successfully.
+func (b *Batch) Add(terms Terms) DocID {
+	b.meta.LastDocID++
+	id := b.meta.LastDocID
+	tids := make(termids, 0, len(terms))
+
 	// Subtract last document ID before this batch was started.
-	d := b.docs[id-b.ix.meta.LastDocID-1]
 	for _, t := range terms {
 		tb := b.terms[t]
 		// Populate term if necessary and allocate a new ID if it
@@ -499,11 +479,12 @@ func (b *Batch) Index(id DocID, terms Terms) {
 				tb.id = b.meta.LastTermID
 			}
 		}
-		d.terms = append(d.terms, tb.id)
-
-		// Add the document ID for later appending to the inverted index.
+		tids = append(tids, tb.id)
 		tb.docs = append(tb.docs, id)
 	}
+
+	b.docs = append(b.docs, &batchDoc{id: id, terms: tids})
+	return id
 }
 
 // Commit executes the batched indexing against the underlying index.
@@ -515,8 +496,10 @@ func (b *Batch) Commit() error {
 		return err
 	}
 	err := b.ix.bolt.Update(func(tx *bolt.Tx) error {
+		docsBkt := tx.Bucket(bktDocs)
+		// Add document IDs to forward index,
 		for _, d := range b.docs {
-			if err := b.addDoc(tx, d.id, d.body, d.terms); err != nil {
+			if err := docsBkt.Put(d.id.bytes(), d.terms.bytes()); err != nil {
 				return err
 			}
 		}
@@ -558,22 +541,6 @@ func (b *Batch) Commit() error {
 func (b *Batch) Rollback() error {
 	b.ix.rwlock.Unlock()
 	return b.tx.Rollback()
-}
-
-func (b *Batch) addDoc(tx *bolt.Tx, id DocID, body Body, tids termids) error {
-	idb := id.bytes()
-
-	ibkt := tx.Bucket(bktDocs)
-	sort.Sort(tids)
-
-	tidsb := tids.bytes()
-
-	v := make([]byte, len(tidsb)+binary.MaxVarintLen32+len(body))
-	n := binary.PutUvarint(v, uint64(len(tidsb)))
-	copy(v[n:], tidsb)
-	copy(v[n+len(tidsb):], body)
-
-	return ibkt.Put(idb, v)
 }
 
 // writePostings adds the postings batch to the index.
