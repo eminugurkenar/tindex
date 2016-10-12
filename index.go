@@ -166,8 +166,8 @@ func (q *Querier) Close() error {
 
 // Search returns an iterator over all document IDs that match all
 // provided matchers.
-func (q *Querier) Search(m Matcher) (Iterator, error) {
-	tids := q.termsForMatcher(m)
+func (q *Querier) Search(key string, m Matcher) (Iterator, error) {
+	tids := q.termsForMatcher(key, m)
 	its := make([]Iterator, 0, len(tids))
 
 	for _, t := range tids {
@@ -211,9 +211,9 @@ func (q *Querier) postingsIter(t termid) (Iterator, error) {
 	return it, nil
 }
 
-func (q *Querier) termsForMatcher(m Matcher) termids {
+func (q *Querier) termsForMatcher(key string, m Matcher) termids {
 	c := q.termBkt.Cursor()
-	pref := append([]byte(m.Key()), 0xff)
+	pref := append([]byte(key), 0xff)
 
 	var ids termids
 	// TODO(fabxc): We scan the entire term value range for the field. Improvide this by direct
@@ -349,38 +349,34 @@ func (t *Term) bytes() []byte {
 
 // Matcher checks whether a value for a key satisfies a check condition.
 type Matcher interface {
-	Key() string
 	Match(value string) bool
 }
 
 // EqualMatcher matches exactly one value for a particular label.
 type EqualMatcher struct {
-	key, val string
+	val string
 }
 
-func NewEqualMatcher(key, val string) *EqualMatcher {
-	return &EqualMatcher{key: key, val: val}
+func NewEqualMatcher(val string) *EqualMatcher {
+	return &EqualMatcher{val: val}
 }
 
-func (m *EqualMatcher) Key() string         { return m.key }
 func (m *EqualMatcher) Match(s string) bool { return m.val == s }
 
 // RegexpMatcher matches labels for the fixed key for which the value
 // matches a regular expression.
 type RegexpMatcher struct {
-	key string
-	re  *regexp.Regexp
+	re *regexp.Regexp
 }
 
-func NewRegexpMatcher(key string, expr string) (*RegexpMatcher, error) {
+func NewRegexpMatcher(expr string) (*RegexpMatcher, error) {
 	re, err := regexp.Compile(expr)
 	if err != nil {
 		return nil, err
 	}
-	return &RegexpMatcher{key: key, re: re}, nil
+	return &RegexpMatcher{re: re}, nil
 }
 
-func (m *RegexpMatcher) Key() string         { return m.key }
 func (m *RegexpMatcher) Match(s string) bool { return m.re.MatchString(s) }
 
 // DocID is a unique identifier for a document.
