@@ -465,26 +465,42 @@ func (b *Batch) Add(terms Terms) DocID {
 
 	// Subtract last document ID before this batch was started.
 	for _, t := range terms {
-		tb := b.terms[t]
-		// Populate term if necessary and allocate a new ID if it
-		// hasn't been created in the database before.
-		if tb == nil {
-			tb = &batchTerm{docs: make([]DocID, 0, 1024)}
-			b.terms[t] = tb
-
-			if idb := b.termBkt.Get(t.bytes()); idb != nil {
-				tb.id = termid(decodeUint64(idb))
-			} else {
-				b.meta.LastTermID++
-				tb.id = b.meta.LastTermID
-			}
-		}
-		tids = append(tids, tb.id)
-		tb.docs = append(tb.docs, id)
+		tids = append(tids, b.addTerm(id, t))
 	}
 
 	b.docs = append(b.docs, &batchDoc{id: id, terms: tids})
 	return id
+}
+
+// SecondaryIndex indexes the document ID for additional terms. The temrs
+// are not stored as part of the document's forward index as the initial terms.
+// The caller has to ensure that the document IDs are added to terms in
+// increasing order.
+func (b *Batch) SecondaryIndex(id DocID, terms ...Term) {
+	for _, t := range terms {
+		b.addTerm(id, t)
+	}
+}
+
+// addTerm adds the document ID to the term's postings list and returns
+// the Term's ID.
+func (b *Batch) addTerm(id DocID, t Term) termid {
+	tb := b.terms[t]
+	// Populate term if necessary and allocate a new ID if it
+	// hasn't been created in the database before.
+	if tb == nil {
+		tb = &batchTerm{docs: make([]DocID, 0, 1024)}
+		b.terms[t] = tb
+
+		if idb := b.termBkt.Get(t.bytes()); idb != nil {
+			tb.id = termid(decodeUint64(idb))
+		} else {
+			b.meta.LastTermID++
+			tb.id = b.meta.LastTermID
+		}
+	}
+	tb.docs = append(tb.docs, id)
+	return tb.id
 }
 
 // Commit executes the batched indexing against the underlying index.
