@@ -1,3 +1,5 @@
+**DEPRECATED: This repository has been an experimental playground to solve indexing problems encountered in time series databases. The work is superseded by the [tsdb](https://github.com/fabxc/tsdb) repository.**
+
 # Tindex
 
 Tindex is a generic index for N dimensions plus time. The motivation for this library
@@ -12,6 +14,3 @@ dimension must also be selectable on querying.
 This library provides high-level interfaces to implement an approach based on an
 inverted index. An implementation of those interfaces is provided using
 [BoltDB](https://github.com/boltdb/bolt).
-
-## Work in progress
-
